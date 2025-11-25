@@ -1,0 +1,8 @@
+.env
+.env.local
+commented_posts.txt
+__pycache__/
+*.log
+
+.env.backup
+
