@@ -416,12 +416,35 @@ class MacroBot:
             return False
         negative_keywords = ['잃', '망', '눈물', '울', '아쉽', '후회', '슬프', 'ㅠ', 'ㅜ', '손실', '적자', '좌절', '힘들']
         return any(keyword in text for keyword in negative_keywords)
+    
+    def _is_positive_comment(self, comment_text: str) -> bool:
+        """댓글이 긍정적인지 판별"""
+        if not comment_text:
+            return False
+        positive_keywords = ['화이팅', '좋아', '대박', '축하', '부럽', '좋네', '좋다', '멋져', '최고', '응원', '파이팅']
+        return any(keyword in comment_text for keyword in positive_keywords)
+    
+    def _is_negative_comment(self, comment_text: str) -> bool:
+        """댓글이 부정적인지 판별"""
+        if not comment_text:
+            return False
+        negative_keywords = ['아쉽', '슬프', '힘들', '후회', '아깝', '위로', '공감']
+        return any(keyword in comment_text for keyword in negative_keywords)
 
     def enhance_tone_variation(self, comment_text: str, post_content: str = '') -> str:
         """물결/느낌표/ㅠㅠ 등을 다양하게 섞되 과한 특수문자 사용은 제한"""
         if not comment_text:
             return comment_text
         comment = comment_text.strip()
+        
+        # 이미 어미가 있는지 확인 (요, 죠, 네요, 어요, 해요, 되요, 다요, 야요, 까요, 나요, 세요 등)
+        # 물음표는 어미가 아니므로 제외하고 체크
+        comment_without_question = comment.rstrip('?')
+        # 정규식으로 어미 확인 (반말 어미 포함: 야, 다, 어, 해, 되, 까, 나, 세, 지, 네 등)
+        has_ending = bool(re.search(r'(요|죠|네요|어요|해요|되요|다요|야요|까요|나요|세요|지요|네|어|해|되|다|야|까|나|세|지)$', comment_without_question))
+        # "야"로 끝나는 경우 명시적으로 체크 (정규식이 놓칠 수 있으므로)
+        if not has_ending and comment_without_question.endswith('야'):
+            has_ending = True
         
         # 특수 문자 개수 제한
         special_chars = ['~', '!', 'ㅠ', 'ㅜ']
@@ -431,29 +454,68 @@ class MacroBot:
                 while comment.count(ch) > 1:
                     comment = comment.replace(ch, '', 1)
         
-        # 존댓말 섞기 (너무 반말만 나오는 것 방지)
-        if '요' not in comment and random.random() < 0.4:
-            suffix_options = ['요', '요~', '용', '요!']
+        # 존댓말 섞기 (너무 반말만 나오는 것 방지) - 이미 어미가 있으면 추가하지 않음
+        if not has_ending and '요' not in comment and random.random() < 0.4:
+            suffix_options = ['요', '요~', '요!']  # '용' 제거
             suffix = random.choice(suffix_options)
             if len(comment) + len(suffix) <= 10:
                 comment += suffix
             elif len(comment) < 10:
                 comment = (comment + suffix)[:10]
-            else:
-                comment = comment[:-1] + '요'
         
-        # 특수 기호 다양화
+        # 댓글 내용에 따라 적절한 특수 기호 추가
         if not any(ch in comment for ch in ['~', '!', 'ㅠ']):
-            if self._is_negative_content(post_content or comment):
-                candidate = random.choice(['ㅠ', 'ㅠㅠ'])
+            # 존댓말 어미로 끝나는 경우 (요, 세요, 네요, 어요, 해요 등)
+            if re.search(r'(요|세요|네요|어요|해요|되요|다요|까요|나요|지요)$', comment_without_question):
+                # 부정적인 댓글 (아쉽, 슬프 등) → ㅠ 추가
+                if self._is_negative_comment(comment):
+                    candidate = 'ㅠ'
+                    if len(comment) + len(candidate) <= 10:
+                        comment += candidate
+                    elif len(comment) < 10:
+                        comment = (comment + candidate)[:10]
+                # 긍정적인 댓글 (화이팅, 좋아, 대박 등) → ! 추가
+                elif self._is_positive_comment(comment):
+                    candidate = '!'
+                    if len(comment) + len(candidate) <= 10:
+                        comment += candidate
+                    elif len(comment) < 10:
+                        comment = (comment + candidate)[:10]
+                # 일반적인 댓글 → ~ 추가 (부드러운 느낌)
+                else:
+                    # 80% 확률로 물결표 추가
+                    if random.random() < 0.8:
+                        if len(comment) + 1 <= 10:
+                            comment += '~'
+                        elif len(comment) < 10:
+                            comment = (comment + '~')[:10]
+            # 존댓말 어미가 아닌 경우
             else:
-                candidate = random.choice(['~', '!'])
-            if len(comment) + len(candidate) <= 10:
-                comment += candidate
-            elif len(comment) < 10:
-                comment = (comment + candidate)[:10]
-            else:
-                comment = comment[:-len(candidate)] + candidate
+                # 부정적인 내용이면 ㅠ 추가
+                if self._is_negative_content(post_content or comment) or self._is_negative_comment(comment):
+                    candidate = random.choice(['ㅠ', 'ㅠㅠ'])
+                    if len(comment) + len(candidate) <= 10:
+                        comment += candidate
+                    elif len(comment) < 10:
+                        comment = (comment + candidate)[:10]
+                    else:
+                        comment = comment[:-len(candidate)] + candidate
+                # 긍정적인 댓글이면 ! 추가
+                elif self._is_positive_comment(comment):
+                    candidate = '!'
+                    if len(comment) + len(candidate) <= 10:
+                        comment += candidate
+                    elif len(comment) < 10:
+                        comment = (comment + candidate)[:10]
+                # 그 외의 경우 물결표나 느낌표 추가
+                else:
+                    candidate = random.choice(['~', '!'])
+                    if len(comment) + len(candidate) <= 10:
+                        comment += candidate
+                    elif len(comment) < 10:
+                        comment = (comment + candidate)[:10]
+                    else:
+                        comment = comment[:-len(candidate)] + candidate
         
         # 중복된 물결/느낌표 정리
         while '~~' in comment:
@@ -461,7 +523,8 @@ class MacroBot:
         while '!!' in comment:
             comment = comment.replace('!!', '!')
         
-        if comment.endswith('~') and random.random() < 0.3:
+        # 이미 물결표로 끝나는데 추가 변화를 주고 싶은 경우 (확률 낮춤)
+        if comment.endswith('~') and random.random() < 0.1:
             comment = comment[:-1] + random.choice(['~!', '요~', '요!'])
         
         return comment[:10]
@@ -1432,11 +1495,25 @@ class MacroBot:
         # 2. 마침표 제거
         comment = re.sub(r'\.+', '', comment)  # 모든 마침표 제거
         
-        # 3. "용" 어미 제거 (예: "힘내용" -> "힘내요", "좋아용" -> "좋아요")
+        # 3. 물음표 위치 정리: 물음표가 중간에 있으면 끝으로 이동
+        # 예: "일어나셨?어요" -> "일어나셨어요?"
+        if '?' in comment:
+            # 물음표가 끝에 있지 않으면 끝으로 이동
+            if not comment.endswith('?'):
+                comment = comment.replace('?', '') + '?'
+        
+        # 4. "용" 어미 제거 (예: "힘내용" -> "힘내요", "좋아용" -> "좋아요")
         comment = re.sub(r'(\S+)용$', r'\1요', comment)  # 끝에 있는 "용" -> "요"
         comment = re.sub(r'(\S+)용\s', r'\1요 ', comment)  # 중간에 있는 "용" -> "요"
         
-        # 4. 중복 어미 제거: "요요", "네요요", "어요요" 등 (모든 위치에서)
+        # 5. 어미 뒤에 추가 어미가 붙는 경우 제거
+        # 예: "노곤하죠여?" -> "노곤하죠?"
+        # 예: "노곤하죠요?" -> "노곤하죠?"
+        # 예: "일어나셨어요?" -> "일어나셨어요?" (정상)
+        comment = re.sub(r'(죠|요|네요|어요|해요|되요|다요|야요|까요|나요|세요|지요|세요)(여|요|네요|어요|해요|되요|다요|야요|까요|나요|세요|지요)(\?|$)', r'\1\3', comment)
+        comment = re.sub(r'(죠|요|네요|어요|해요|되요|다요|야요|까요|나요|세요|지요)(여|요|네요|어요|해요|되요|다요|야요|까요|나요|세요|지요)$', r'\1', comment)
+        
+        # 6. 중복 어미 제거: "요요", "네요요", "어요요" 등 (모든 위치에서)
         comment = re.sub(r'요요+', '요', comment)  # "요요" -> "요", "요요요" -> "요"
         comment = re.sub(r'네요요+', '네요', comment)  # "네요요" -> "네요"
         comment = re.sub(r'어요요+', '어요', comment)  # "어요요" -> "어요"
@@ -1444,17 +1521,19 @@ class MacroBot:
         comment = re.sub(r'되요요+', '되요', comment)  # "되요요" -> "되요"
         comment = re.sub(r'다요요+', '다요', comment)  # "다요요" -> "다요"
         comment = re.sub(r'야요요+', '야요', comment)  # "야요요" -> "야요"
+        comment = re.sub(r'죠요+', '죠', comment)  # "죠요" -> "죠"
+        comment = re.sub(r'죠요요+', '죠', comment)  # "죠요요" -> "죠"
         
-        # 5. 댓글 끝에 "요"가 중복되거나 어색하게 붙는 경우 정리
+        # 7. 댓글 끝에 "요"가 중복되거나 어색하게 붙는 경우 정리
         # 예: "화이팅요요" -> "화이팅요" (위에서 처리)
         # 예: "힘내요 요" -> "힘내요"
         comment = re.sub(r'(\S+)요\s*요', r'\1요', comment)  # "힘내요 요" -> "힘내요"
         comment = re.sub(r'(\S+)\s*요$', r'\1요', comment)  # "화이팅 요" -> "화이팅요"
         
-        # 6. 불필요한 공백 제거 (예: "화이팅  요" -> "화이팅요")
+        # 8. 불필요한 공백 제거 (예: "화이팅  요" -> "화이팅요")
         comment = re.sub(r'\s+([요])', r'\1', comment)
         
-        # 7. 연속된 공백 제거
+        # 9. 연속된 공백 제거
         comment = re.sub(r'\s+', ' ', comment)
         comment = comment.strip()
         
