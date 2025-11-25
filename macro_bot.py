@@ -94,8 +94,30 @@ def ensure_playwright_browser():
                     print()
                     return False
     except Exception as e:
+        error_msg = str(e)
         print(f"[경고] 브라우저 확인 중 오류 발생: {e}")
-        print("[안내] 브라우저가 제대로 작동하지 않을 수 있습니다.")
+        
+        # "Could not find platform independent libraries" 오류 처리
+        if "platform independent libraries" in error_msg or "prefix" in error_msg.lower():
+            print()
+            print("=" * 60)
+            print("[오류] Python 환경 문제가 감지되었습니다.")
+            print("=" * 60)
+            print()
+            print("해결 방법:")
+            print("1. Python을 재설치하세요 (https://www.python.org/downloads/)")
+            print("2. 또는 다음 명령어로 Playwright 브라우저를 수동 설치하세요:")
+            print("   python -m playwright install chromium")
+            print()
+            print("3. 가상 환경을 사용하는 경우:")
+            print("   - 가상 환경을 비활성화하고 다시 시도하세요")
+            print("   - 또는 새로운 가상 환경을 만들고 다시 설치하세요")
+            print()
+            print("=" * 60)
+        else:
+            print("[안내] 브라우저가 제대로 작동하지 않을 수 있습니다.")
+            print("[안내] 수동 설치 방법: python -m playwright install chromium")
+        
         return False
 
 
@@ -418,10 +440,11 @@ class MacroBot:
         return any(keyword in text for keyword in negative_keywords)
     
     def _is_positive_comment(self, comment_text: str) -> bool:
-        """댓글이 긍정적인지 판별"""
+        """댓글이 긍정적인지 판별 (젊은층 표현 포함)"""
         if not comment_text:
             return False
-        positive_keywords = ['화이팅', '좋아', '대박', '축하', '부럽', '좋네', '좋다', '멋져', '최고', '응원', '파이팅']
+        positive_keywords = ['화이팅', '좋아', '대박', '축하', '부럽', '좋네', '좋다', '멋져', '최고', '응원', '파이팅', 
+                            '와', '헐', '진짜', '개좋', '짱', '허걱', '와우']
         return any(keyword in comment_text for keyword in positive_keywords)
     
     def _is_negative_comment(self, comment_text: str) -> bool:
@@ -431,11 +454,16 @@ class MacroBot:
         negative_keywords = ['아쉽', '슬프', '힘들', '후회', '아깝', '위로', '공감']
         return any(keyword in comment_text for keyword in negative_keywords)
 
-    def enhance_tone_variation(self, comment_text: str, post_content: str = '') -> str:
-        """물결/느낌표/ㅠㅠ 등을 다양하게 섞되 과한 특수문자 사용은 제한"""
+    def enhance_tone_variation(self, comment_text: str, post_content: str = '', existing_comments: list = None) -> str:
+        """물결/느낌표/ㅠㅠ 등을 다양하게 섞되 과한 특수문자 사용은 제한 (기존 댓글 스타일 반영)"""
         if not comment_text:
             return comment_text
         comment = comment_text.strip()
+        
+        # 기존 댓글 스타일 분석 (있으면)
+        style = None
+        if existing_comments and len(existing_comments) > 0:
+            style = self.analyze_comment_style(existing_comments)
         
         # 이미 어미가 있는지 확인 (요, 죠, 네요, 어요, 해요, 되요, 다요, 야요, 까요, 나요, 세요 등)
         # 물음표는 어미가 아니므로 제외하고 체크
@@ -446,12 +474,13 @@ class MacroBot:
         if not has_ending and comment_without_question.endswith('야'):
             has_ending = True
         
-        # 특수 문자 개수 제한
+        # 특수 문자 개수 제한 (젊은층 톤을 위해 조금 더 허용)
         special_chars = ['~', '!', 'ㅠ', 'ㅜ']
         special_count = sum(comment.count(ch) for ch in special_chars)
-        if special_count > 2:
+        # 젊은층은 특수 기호를 더 많이 사용하므로 3개까지 허용
+        if special_count > 3:
             for ch in special_chars:
-                while comment.count(ch) > 1:
+                while comment.count(ch) > 2:
                     comment = comment.replace(ch, '', 1)
         
         # 존댓말 섞기 (너무 반말만 나오는 것 방지) - 이미 어미가 있으면 추가하지 않음
@@ -463,32 +492,57 @@ class MacroBot:
             elif len(comment) < 10:
                 comment = (comment + suffix)[:10]
         
-        # 댓글 내용에 따라 적절한 특수 기호 추가
+        # 댓글 내용에 따라 적절한 특수 기호 추가 (기존 댓글 스타일 반영)
         if not any(ch in comment for ch in ['~', '!', 'ㅠ']):
-            # 존댓말 어미로 끝나는 경우 (요, 세요, 네요, 어요, 해요 등)
-            if re.search(r'(요|세요|네요|어요|해요|되요|다요|까요|나요|지요)$', comment_without_question):
-                # 부정적인 댓글 (아쉽, 슬프 등) → ㅠ 추가
-                if self._is_negative_comment(comment):
-                    candidate = 'ㅠ'
+            # 기존 댓글 스타일이 있으면 그에 맞춰 특수 기호 추가
+            should_add_emoji = True
+            emoji_probability = 0.95  # 기본 확률
+            
+            if style:
+                # 기존 댓글에서 특수 기호 사용 비율에 따라 조정
+                if style['emoji_usage_rate'] < 0.1:  # 10% 미만이면 특수 기호 거의 사용 안 함
+                    emoji_probability = 0.3  # 확률 낮춤
+                elif style['emoji_usage_rate'] < 0.3:  # 30% 미만이면 적당히 사용
+                    emoji_probability = 0.7
+                elif style['emoji_usage_rate'] >= 0.5:  # 50% 이상이면 많이 사용
+                    emoji_probability = 0.98
+                
+                # 기존 댓글이 특수 기호를 거의 사용하지 않으면 추가하지 않음
+                if not style['has_emoji'] and style['emoji_usage_rate'] < 0.1:
+                    should_add_emoji = False
+            
+            if should_add_emoji and random.random() < emoji_probability:
+                # 존댓말 어미로 끝나는 경우 (요, 세요, 네요, 어요, 해요 등)
+                if re.search(r'(요|세요|네요|어요|해요|되요|다요|까요|나요|지요)$', comment_without_question):
+                    # 기존 댓글 스타일에 맞춰 특수 기호 선택
+                    if style:
+                        # 기존 댓글에서 많이 사용하는 특수 기호 우선
+                        if style['has_ㅠ'] and self._is_negative_comment(comment):
+                            candidate = 'ㅠ'
+                        elif style['has_exclamation'] and self._is_positive_comment(comment):
+                            candidate = '!'
+                        elif style['has_tilde']:
+                            candidate = '~'
+                        # 기존 댓글 스타일이 없으면 내용에 따라 결정
+                        elif self._is_negative_comment(comment):
+                            candidate = 'ㅠ'
+                        elif self._is_positive_comment(comment):
+                            candidate = '!'
+                        else:
+                            candidate = '~'
+                    else:
+                        # 기존 댓글 스타일 정보가 없으면 내용에 따라 결정
+                        if self._is_negative_comment(comment):
+                            candidate = 'ㅠ'
+                        elif self._is_positive_comment(comment):
+                            candidate = '!'
+                        else:
+                            candidate = '~'
+                    
                     if len(comment) + len(candidate) <= 10:
                         comment += candidate
                     elif len(comment) < 10:
                         comment = (comment + candidate)[:10]
-                # 긍정적인 댓글 (화이팅, 좋아, 대박 등) → ! 추가
-                elif self._is_positive_comment(comment):
-                    candidate = '!'
-                    if len(comment) + len(candidate) <= 10:
-                        comment += candidate
-                    elif len(comment) < 10:
-                        comment = (comment + candidate)[:10]
-                # 일반적인 댓글 → ~ 추가 (부드러운 느낌)
-                else:
-                    # 80% 확률로 물결표 추가
-                    if random.random() < 0.8:
-                        if len(comment) + 1 <= 10:
-                            comment += '~'
-                        elif len(comment) < 10:
-                            comment = (comment + '~')[:10]
             # 존댓말 어미가 아닌 경우
             else:
                 # 부정적인 내용이면 ㅠ 추가
@@ -507,9 +561,10 @@ class MacroBot:
                         comment += candidate
                     elif len(comment) < 10:
                         comment = (comment + candidate)[:10]
-                # 그 외의 경우 물결표나 느낌표 추가
+                # 그 외의 경우 물결표나 느낌표 추가 (젊은층 톤)
                 else:
-                    candidate = random.choice(['~', '!'])
+                    # 젊은층은 물결표를 더 선호
+                    candidate = random.choice(['~', '~', '!'])  # 물결표 확률 2배
                     if len(comment) + len(candidate) <= 10:
                         comment += candidate
                     elif len(comment) < 10:
@@ -523,11 +578,70 @@ class MacroBot:
         while '!!' in comment:
             comment = comment.replace('!!', '!')
         
-        # 이미 물결표로 끝나는데 추가 변화를 주고 싶은 경우 (확률 낮춤)
-        if comment.endswith('~') and random.random() < 0.1:
+        # 이미 특수 기호가 있는 경우에도 젊은층 톤을 위해 다양화 (확률 증가)
+        if comment.endswith('~') and random.random() < 0.3:
             comment = comment[:-1] + random.choice(['~!', '요~', '요!'])
+        elif comment.endswith('!') and random.random() < 0.2:
+            # 느낌표 뒤에 물결표 추가 (예: "화이팅이요!~")
+            if len(comment) + 1 <= 10:
+                comment += '~'
+        
+        # 의도적인 오타 추가 (사람처럼 보이게, 25% 확률)
+        comment = self.add_natural_typos(comment)
         
         return comment[:10]
+    
+    def add_natural_typos(self, comment: str) -> str:
+        """의도적인 오타를 추가해서 더 자연스럽게 (젊은층이 자주 쓰는 오타 패턴)"""
+        if not comment or len(comment) < 2:
+            return comment
+        
+        # 25% 확률로 오타 추가 (너무 자주 하면 부자연스러움)
+        if random.random() > 0.25:
+            return comment
+        
+        original_comment = comment
+        
+        # 젊은층이 자주 쓰는 오타 패턴들 (우선순위 순)
+        # 긴 패턴부터 먼저 체크해야 함 (예: "네요"가 "요"보다 먼저)
+        if re.search(r'네요$', comment):
+            comment = re.sub(r'네요$', random.choice(['네욘', '네용', '네요']), comment)
+        elif re.search(r'어요$', comment):
+            comment = re.sub(r'어요$', random.choice(['어욘', '어용', '어요']), comment)
+        elif re.search(r'해요$', comment):
+            comment = re.sub(r'해요$', random.choice(['해욘', '해용', '해요']), comment)
+        elif re.search(r'되요$', comment):
+            comment = re.sub(r'되요$', random.choice(['되욘', '되용', '되요']), comment)
+        elif re.search(r'다요$', comment):
+            comment = re.sub(r'다요$', random.choice(['다욘', '다용', '다요']), comment)
+        elif re.search(r'까요$', comment):
+            comment = re.sub(r'까요$', random.choice(['까욘', '까용', '까요']), comment)
+        elif re.search(r'나요$', comment):
+            comment = re.sub(r'나요$', random.choice(['나욘', '나용', '나요']), comment)
+        elif re.search(r'세요$', comment):
+            comment = re.sub(r'세요$', random.choice(['세욘', '세용', '세요']), comment)
+        elif re.search(r'지요$', comment):
+            comment = re.sub(r'지요$', random.choice(['지욘', '지용', '지요']), comment)
+        elif re.search(r'요$', comment):
+            # "요"로 끝나는 경우 (다른 패턴에 해당하지 않는 경우)
+            comment = re.sub(r'요$', random.choice(['욘', '용', '요']), comment)
+        
+        # 단어 내부 오타 (가끔, 이미 어미 오타를 적용하지 않은 경우만)
+        if comment == original_comment:
+            if '좋아' in comment and random.random() < 0.3:
+                comment = comment.replace('좋아', '조아', 1)
+            elif '맞아' in comment and random.random() < 0.2:
+                comment = comment.replace('맞아', '마자', 1)
+            elif '그래' in comment and random.random() < 0.2:
+                comment = comment.replace('그래', '그레', 1)
+            elif '화이팅' in comment and random.random() < 0.15:
+                comment = comment.replace('화이팅', '파이팅', 1)
+        
+        # 길이 제한 확인 (10글자 초과 시 원래대로)
+        if len(comment) > 10:
+            comment = original_comment
+        
+        return comment
 
     async def enforce_comment_gap(self):
         """댓글 간 랜덤 대기 (리캡챠 회피용)"""
@@ -569,7 +683,7 @@ class MacroBot:
                     alt_comment = self.generate_style_matched_comment(existing_comments or [], post_content or '')
                     if not self.has_meaningful_content(alt_comment):
                         alt_comment = "지치네요"
-            alt_comment = self.enhance_tone_variation(alt_comment, post_content)
+            alt_comment = self.enhance_tone_variation(alt_comment, post_content, existing_comments)
             comment_text = alt_comment
             attempts += 1
         print(f"[경고] 댓글이 계속 반복되어 기본 댓글로 전환합니다. 원본: {original}")
@@ -578,7 +692,7 @@ class MacroBot:
             fallback += '~'
         if not self.has_meaningful_content(fallback):
             fallback = "지치네요"
-        fallback = self.enhance_tone_variation(fallback, post_content)
+        fallback = self.enhance_tone_variation(fallback, post_content, existing_comments)
         return fallback
 
     def build_board_page_url(self, page_number: int) -> str:
@@ -823,20 +937,36 @@ class MacroBot:
             if not date_text:
                 return None
             
-            # 날짜 파싱 시도
+            # 날짜 파싱 시도 (oncapan.com 형식 포함)
             date_formats = [
-                '%Y-%m-%d %H:%M:%S',
-                '%Y-%m-%d %H:%M',
-                '%Y.%m.%d %H:%M',
-                '%Y/%m/%d %H:%M',
-                '%Y-%m-%d',
-                '%Y.%m.%d',
-                '%Y/%m/%d',
+                '%y-%m-%d %H:%M',           # oncapan.com 형식: "25-11-25 22:06" (우선순위 1)
+                '%y-%m-%d %H:%M:%S',        # oncapan.com 형식: "25-11-25 22:06:00"
+                '%Y-%m-%d %H:%M:%S',        # 표준 형식: "2025-11-25 22:06:00"
+                '%Y-%m-%d %H:%M',           # 표준 형식: "2025-11-25 22:06"
+                '%Y.%m.%d %H:%M',           # 점 구분: "2025.11.25 22:06"
+                '%Y/%m/%d %H:%M',           # 슬래시 구분: "2025/11/25 22:06"
+                '%y-%m-%d',                 # oncapan.com 날짜만: "25-11-25"
+                '%Y-%m-%d',                 # 표준 날짜만: "2025-11-25"
+                '%Y.%m.%d',                 # 점 구분 날짜만: "2025.11.25"
+                '%Y/%m/%d',                 # 슬래시 구분 날짜만: "2025/11/25"
             ]
             
             for fmt in date_formats:
                 try:
-                    return datetime.strptime(date_text, fmt)
+                    parsed_date = datetime.strptime(date_text, fmt)
+                    # 2자리 연도(YY)인 경우 2000년대로 변환
+                    if fmt.startswith('%y'):
+                        # 현재 연도 기준으로 가까운 연도 선택
+                        current_year = datetime.now().year
+                        parsed_year = parsed_date.year
+                        # 1900년대면 2000년대로 변환
+                        if parsed_year < 2000:
+                            parsed_date = parsed_date.replace(year=parsed_year + 100)
+                        # 현재 연도보다 크면 과거 연도로 간주 (예: 25년이면 2025년)
+                        elif parsed_year > current_year:
+                            # 이미 올바른 연도일 수 있음
+                            pass
+                    return parsed_date
                 except:
                     continue
             
@@ -869,31 +999,71 @@ class MacroBot:
     
     async def is_post_within_24h(self, post_url: str) -> bool:
         """게시글이 24시간 이내인지 확인"""
-        post_date = await self.get_post_date(post_url)
+        # 현재 URL 저장 (게시판 복귀용)
+        current_url_before = self.page.url
         
-        if not post_date:
-            print("[경고] 게시글 작성 시간을 확인할 수 없습니다. 댓글을 작성합니다.")
-            return True  # 시간을 확인할 수 없으면 작성
-        
-        now = datetime.now()
-        time_diff = now - post_date
-        
-        if time_diff <= timedelta(hours=24):
-            print(f"[확인] 게시글 작성 시간: {post_date.strftime('%Y-%m-%d %H:%M')} ({(time_diff.total_seconds() / 3600):.1f}시간 전)")
-            return True
-        else:
-            hours_ago = time_diff.total_seconds() / 3600
-            print(f"[건너뛰기] 게시글이 24시간을 초과했습니다. ({hours_ago:.1f}시간 전, 작성 시간: {post_date.strftime('%Y-%m-%d %H:%M')})")
-            return False
+        try:
+            post_date = await self.get_post_date(post_url)
+            
+            if not post_date:
+                print("[경고] 게시글 작성 시간을 확인할 수 없습니다. 댓글을 작성합니다.")
+                # 게시판으로 복귀
+                if self.config['board_url'] not in current_url_before:
+                    # 원래 게시판이었으면 복귀
+                    if 'board' in current_url_before.lower() or 'bbs' in current_url_before.lower():
+                        try:
+                            await self.page.goto(current_url_before, wait_until='networkidle', timeout=10000)
+                        except:
+                            await self.page.goto(self.config['board_url'], wait_until='networkidle', timeout=10000)
+                    else:
+                        await self.page.goto(self.config['board_url'], wait_until='networkidle', timeout=10000)
+                else:
+                    await self.page.goto(self.config['board_url'], wait_until='networkidle', timeout=10000)
+                return True  # 시간을 확인할 수 없으면 작성
+            
+            now = datetime.now()
+            time_diff = now - post_date
+            
+            # 게시판으로 복귀
+            if self.config['board_url'] not in current_url_before:
+                # 원래 게시판이었으면 복귀
+                if 'board' in current_url_before.lower() or 'bbs' in current_url_before.lower():
+                    try:
+                        await self.page.goto(current_url_before, wait_until='networkidle', timeout=10000)
+                    except:
+                        await self.page.goto(self.config['board_url'], wait_until='networkidle', timeout=10000)
+                else:
+                    await self.page.goto(self.config['board_url'], wait_until='networkidle', timeout=10000)
+            else:
+                await self.page.goto(self.config['board_url'], wait_until='networkidle', timeout=10000)
+            
+            if time_diff <= timedelta(hours=24):
+                print(f"[확인] 게시글 작성 시간: {post_date.strftime('%Y-%m-%d %H:%M')} ({(time_diff.total_seconds() / 3600):.1f}시간 전)")
+                return True
+            else:
+                hours_ago = time_diff.total_seconds() / 3600
+                print(f"[건너뛰기] 게시글이 24시간을 초과했습니다. ({hours_ago:.1f}시간 전, 작성 시간: {post_date.strftime('%Y-%m-%d %H:%M')})")
+                return False
+        except Exception as e:
+            print(f"[경고] 시간 확인 중 오류: {e}. 게시판으로 복귀합니다.")
+            # 오류 발생 시 게시판으로 복귀
+            try:
+                await self.page.goto(self.config['board_url'], wait_until='networkidle', timeout=10000)
+            except:
+                pass
+            return True  # 오류 시 작성 허용
     
     async def get_next_post_link(self, processed_urls: set) -> str:
         """게시판에서 다음 게시글 링크 하나만 가져오기 (24시간 이내만)"""
         # 게시판이 이미 열려있는지 확인하고, 아니면 접속
+        # 중요: 반드시 게시판 페이지에서만 게시글을 선택해야 함
         current_url = self.page.url
         if self.config['board_url'] not in current_url:
-            print(f"[게시판] {self.config['board_url']} 접속 중...")
+            print(f"[게시판] 현재 게시판이 아닙니다. 게시판으로 이동 중... (현재 URL: {current_url})")
             await self.page.goto(self.config['board_url'], wait_until='networkidle')
             await self.random_delay(2, 4)
+        else:
+            print(f"[게시판] 게시판 페이지 확인됨: {current_url}")
         
         # 페이지가 완전히 로드될 때까지 대기
         await self.page.wait_for_load_state('networkidle')
@@ -999,12 +1169,18 @@ class MacroBot:
             
             print(f"[게시판] {len(all_urls)}개의 게시글 링크를 찾았습니다.")
             
-            # 순서 선택 (기본값: 최신순)
-            order = self.config.get('post_order', 'latest')
+            # 순서 선택 (기본값: 랜덤)
+            order = self.config.get('post_order', 'random')
             
             # 24시간 이내 게시글만 필터링
             valid_urls = []
-            max_check = min(20, len(all_urls))  # 최대 20개까지만 확인 (성능 고려)
+            # 랜덤 모드일 때는 더 많은 게시글을 확인 (전체 범위에서 랜덤 선택)
+            if order == 'random':
+                max_check = min(50, len(all_urls))  # 랜덤 모드: 최대 50개 확인
+            else:
+                max_check = min(20, len(all_urls))  # 최신순/오래된순: 최대 20개 확인 (성능 고려)
+            
+            print(f"[게시판] {max_check}개의 게시글을 확인 중... (모드: {order})")
             
             for url in all_urls[:max_check]:
                 # 이미 댓글을 작성한 게시글은 건너뛰기
@@ -1012,20 +1188,37 @@ class MacroBot:
                     print(f"[중복방지] 이미 댓글 작성한 게시글 건너뛰기: {url}")
                     continue
                 
-                if await self.is_post_within_24h(url):
+                # 이번 실행에서 이미 처리한 게시글은 건너뛰기
+                if url in processed_urls:
+                    print(f"[중복방지] 이번 실행에서 이미 처리한 게시글 건너뛰기: {url}")
+                    continue
+                
+                # 랜덤 모드에서는 시간 확인을 건너뛰고 모든 게시글을 후보에 추가 (성능 개선)
+                # 시간 확인은 write_comment 내에서 수행
+                if order == 'random':
+                    # 랜덤 모드: 시간 확인 없이 바로 추가 (나중에 write_comment에서 확인)
                     valid_urls.append(url)
-                    # 첫 번째 유효한 게시글을 찾으면 중단 (최신순일 때)
-                    if order == 'latest':
-                        break
+                else:
+                    # 최신순/오래된순: 시간 확인 필요
+                    if await self.is_post_within_24h(url):
+                        valid_urls.append(url)
+                        # 첫 번째 유효한 게시글을 찾으면 중단 (최신순일 때)
+                        if order == 'latest':
+                            break
             
             if not valid_urls:
                 print("[게시판] 24시간 이내 게시글이 없습니다.")
                 return None
             
-            if order == 'random' and len(valid_urls) > 1:
+            # 게시글 선택
+            if order == 'random':
                 selected_url = random.choice(valid_urls)
-                print(f"[게시판] 랜덤으로 게시글 선택: {selected_url}")
-            else:
+                print(f"[게시판] 랜덤으로 게시글 선택: {selected_url} (후보 {len(valid_urls)}개 중)")
+            elif order == 'oldest':
+                # 가장 오래된 게시글 선택 (리스트의 마지막)
+                selected_url = valid_urls[-1]
+                print(f"[게시판] 오래된 순으로 게시글 선택: {selected_url} (후보 {len(valid_urls)}개 중)")
+            else:  # latest
                 selected_url = valid_urls[0]
                 print(f"[게시판] 최신순으로 게시글 선택: {selected_url}")
             
@@ -1048,9 +1241,13 @@ class MacroBot:
     async def get_post_title(self) -> str:
         """게시글 제목 가져오기"""
         try:
-            # 게시글 제목 선택자들
+            # 게시글 제목 선택자들 (oncapan.com 구조 반영)
             title_selectors = [
-                '#bo_v_atc .bo_v_tit',     # 그누보드 제목
+                'span.bo_v_tit',            # oncapan.com 제목 (우선순위 1)
+                '#bo_v .bo_v_tit',          # oncapan.com 제목 (우선순위 2)
+                '#bo_v_atc .bo_v_tit',      # 그누보드 제목
+                '#bo_v_title .bo_v_tit',    # 그누보드 제목 변형
+                'h2#bo_v_title .bo_v_tit',  # 그누보드 제목 변형 2
                 '.view_title',              # 일반적인 제목
                 '.board_title',             # 게시판 제목
                 'h1',                       # HTML5 h1 태그
@@ -1077,12 +1274,16 @@ class MacroBot:
                 except Exception:
                     continue
             
-            # JavaScript로 직접 제목 찾기
+            # JavaScript로 직접 제목 찾기 (oncapan.com 구조 반영)
             if not title_text:
                 title_text = await self.page.evaluate("""
                     () => {
                         const selectors = [
-                            '#bo_v_atc .bo_v_tit',
+                            'span.bo_v_tit',           // oncapan.com 제목 (우선순위 1)
+                            '#bo_v .bo_v_tit',         // oncapan.com 제목 (우선순위 2)
+                            '#bo_v_atc .bo_v_tit',     // 그누보드 제목
+                            '#bo_v_title .bo_v_tit',   // 그누보드 제목 변형
+                            'h2#bo_v_title .bo_v_tit', // 그누보드 제목 변형 2
                             '.view_title',
                             '.board_title',
                             'h1',
@@ -1239,58 +1440,105 @@ class MacroBot:
             return ""
     
     def analyze_comment_style(self, existing_comments: list) -> dict:
-        """기존 댓글들의 말투 스타일 분석"""
+        """기존 댓글들의 말투 스타일 분석 (더 정확하게)"""
         if not existing_comments or len(existing_comments) == 0:
             return {
                 'ending': '요',  # 기본값
                 'tone': 'casual',  # casual, formal
                 'has_emoji': False,
-                'avg_length': 5
+                'has_tilde': False,
+                'has_exclamation': False,
+                'has_ㅠ': False,
+                'emoji_usage_rate': 0.0,
+                'avg_length': 5,
+                'common_endings': ['요']
             }
         
         endings = []
         has_emoji_count = 0
+        has_tilde_count = 0
+        has_exclamation_count = 0
+        has_ㅠ_count = 0
         total_length = 0
         
-        for comment in existing_comments[:10]:  # 최대 10개만 분석
+        for comment in existing_comments[:15]:  # 최대 15개 분석 (더 많은 샘플)
             if not comment or len(comment.strip()) < 2:
                 continue
             
             comment = comment.strip()
             total_length += len(comment)
             
-            # 이모티콘 체크
-            if any(emoji in comment for emoji in ['ㅠ', 'ㅜ', '~', '!', '?', 'ㅎ', 'ㅋ']):
+            # 특수 기호 체크 (더 정확하게)
+            if '~' in comment:
+                has_tilde_count += 1
+                has_emoji_count += 1
+            if '!' in comment:
+                has_exclamation_count += 1
+                has_emoji_count += 1
+            if 'ㅠ' in comment or 'ㅜ' in comment:
+                has_ㅠ_count += 1
                 has_emoji_count += 1
             
-            # 끝말 분석
-            if comment.endswith('요') or comment.endswith('요!'):
+            # 끝말 분석 (더 정확하게)
+            comment_clean = comment.rstrip('~!?ㅠㅜㅎㅋ')
+            if comment_clean.endswith('요'):
                 endings.append('요')
-            elif comment.endswith('다') or comment.endswith('다!'):
-                endings.append('다')
-            elif comment.endswith('어') or comment.endswith('어!'):
-                endings.append('어')
-            elif comment.endswith('해') or comment.endswith('해!'):
-                endings.append('해')
-            elif comment.endswith('네요') or comment.endswith('네요!'):
+            elif comment_clean.endswith('네요'):
                 endings.append('네요')
+            elif comment_clean.endswith('어요'):
+                endings.append('어요')
+            elif comment_clean.endswith('해요'):
+                endings.append('해요')
+            elif comment_clean.endswith('되요'):
+                endings.append('되요')
+            elif comment_clean.endswith('다요'):
+                endings.append('다요')
+            elif comment_clean.endswith('세요'):
+                endings.append('세요')
+            elif comment_clean.endswith('까요'):
+                endings.append('까요')
+            elif comment_clean.endswith('나요'):
+                endings.append('나요')
+            elif comment_clean.endswith('지요'):
+                endings.append('지요')
+            elif comment_clean.endswith('죠'):
+                endings.append('죠')
+            elif comment_clean.endswith('다'):
+                endings.append('다')
+            elif comment_clean.endswith('어'):
+                endings.append('어')
+            elif comment_clean.endswith('해'):
+                endings.append('해')
+            elif comment_clean.endswith('야'):
+                endings.append('야')
             else:
                 endings.append('요')  # 기본값
         
-        # 가장 많이 사용된 끝말
+        # 가장 많이 사용된 끝말들 (상위 3개)
+        from collections import Counter
+        ending_counts = Counter(endings)
+        common_endings = [ending for ending, count in ending_counts.most_common(3)]
+        
         if endings:
-            most_common_ending = max(set(endings), key=endings.count)
+            most_common_ending = ending_counts.most_common(1)[0][0]
         else:
             most_common_ending = '요'
         
-        avg_length = total_length // len(existing_comments) if existing_comments else 5
-        has_emoji = has_emoji_count > len(existing_comments) * 0.3  # 30% 이상이면 이모티콘 사용
+        total_comments = len([c for c in existing_comments[:15] if c and len(c.strip()) >= 2])
+        avg_length = total_length // total_comments if total_comments > 0 else 5
+        emoji_usage_rate = has_emoji_count / total_comments if total_comments > 0 else 0.0
+        has_emoji = emoji_usage_rate > 0.2  # 20% 이상이면 특수 기호 사용
         
         return {
             'ending': most_common_ending,
             'tone': 'casual',  # 도박 게시판은 대부분 반말/캐주얼
             'has_emoji': has_emoji,
-            'avg_length': avg_length
+            'has_tilde': has_tilde_count > total_comments * 0.2,  # 20% 이상이면 물결표 사용
+            'has_exclamation': has_exclamation_count > total_comments * 0.2,  # 20% 이상이면 느낌표 사용
+            'has_ㅠ': has_ㅠ_count > total_comments * 0.15,  # 15% 이상이면 ㅠ 사용
+            'emoji_usage_rate': emoji_usage_rate,
+            'avg_length': avg_length,
+            'common_endings': common_endings
         }
     
     def generate_style_matched_comment(self, existing_comments: list, post_content: str = '') -> str:
@@ -1327,13 +1575,16 @@ class MacroBot:
         else:
             comment = f"{base}요"
         
-        # 가벼운 댓글도 추가 (기분 좋은 글용) - 이모티콘 제거
+        # 가벼운 댓글도 추가 (기분 좋은 글용)
         if base in ['축하', '부럽', '대박', '좋아'] and random.random() > 0.7:  # 30% 확률
-            light_comments = ['좋아요', '부럽네요', '대박이네요', '기쁘네요']
+            # 기존 댓글 스타일에 맞는 어미 사용
+            if style['ending'] == '네요':
+                light_comments = ['좋아네요', '부럽네요', '대박이네요', '기쁘네요']
+            elif style['ending'] == '어요':
+                light_comments = ['좋아어요', '부럽어요', '대박이어요', '기쁘어요']
+            else:
+                light_comments = ['좋아요', '부럽네요', '대박이네요', '기쁘네요']
             comment = random.choice(light_comments)
-        
-        # 이모티콘 추가 제거 (이모티콘 사용 금지)
-        # 이모티콘은 사용하지 않음
         
         # 길이 제한 (10글자)
         if len(comment) > 10:
@@ -1342,10 +1593,11 @@ class MacroBot:
         if not self.has_meaningful_content(comment):
             comment = '지치네요'
         
-        comment = self.enhance_tone_variation(comment, post_content)
+        # 기존 댓글 스타일에 맞춰 특수 기호 추가 (기존 댓글 스타일 반영)
+        comment = self.enhance_tone_variation(comment, post_content, existing_comments)
         
-        # 중복 어미 제거 (요요, 네요요 등)
-        comment = self.clean_comment(comment)
+        # 중복 어미만 제거 (특수 기호는 보존)
+        comment = self.clean_comment_final_only(comment)
         
         print(f"[댓글] 기존 댓글 스타일 분석: 끝말={style['ending']}, 이모티콘={style['has_emoji']}")
         print(f"[댓글] 스타일 맞춤 댓글 생성: {comment}")
@@ -1362,24 +1614,35 @@ class MacroBot:
                 () => {
                     let allComments = [];
                     
-                    // 방법 1: article[id^="c_"] 태그로 댓글 찾기 (가장 정확)
+                    // 방법 1: article[id^="c_"] 태그로 댓글 찾기 (oncapan.com 구조, 가장 정확)
                     const commentArticles = document.querySelectorAll('article[id^="c_"]');
                     commentArticles.forEach(article => {
-                        // textarea[id^="save_comment_"]에서 댓글 텍스트 가져오기
+                        // 우선순위 1: textarea[id^="save_comment_"]에서 댓글 텍스트 가져오기 (oncapan.com)
                         const textarea = article.querySelector('textarea[id^="save_comment_"]');
                         if (textarea) {
                             const text = (textarea.value || textarea.textContent || '').trim();
                             if (text && text.length > 0) {
                                 allComments.push(text);
+                                return; // 찾았으면 다음 댓글로
                             }
-                        } else {
-                            // textarea가 없으면 .cmt_contents에서 텍스트 가져오기
-                            const cmtContents = article.querySelector('.cmt_contents');
-                            if (cmtContents) {
-                                const text = (cmtContents.innerText || cmtContents.textContent || '').trim();
+                        }
+                        
+                        // 우선순위 2: .cmt_contents > p 태그에서 텍스트 가져오기 (oncapan.com)
+                        const cmtContents = article.querySelector('.cmt_contents');
+                        if (cmtContents) {
+                            // p 태그 내부 텍스트 우선
+                            const pTag = cmtContents.querySelector('p');
+                            if (pTag) {
+                                const text = (pTag.innerText || pTag.textContent || '').trim();
                                 if (text && text.length > 0) {
                                     allComments.push(text);
+                                    return;
                                 }
+                            }
+                            // p 태그가 없으면 .cmt_contents 전체 텍스트
+                            const text = (cmtContents.innerText || cmtContents.textContent || '').trim();
+                            if (text && text.length > 0) {
+                                allComments.push(text);
                             }
                         }
                     });
@@ -1483,14 +1746,19 @@ class MacroBot:
             return []
     
     def clean_comment(self, comment: str) -> str:
-        """댓글에서 중복 어미, 이모티콘, 마침표, 불필요한 문자 제거"""
+        """댓글에서 중복 어미, 마침표, 불필요한 문자 제거 (특수 기호는 보존)"""
         import re
         
         if not comment:
             return comment
         
-        # 1. 이모티콘/기호 제거 (물결표, 느낌표, ㅠㅠ 등)
-        comment = re.sub(r'[~!ㅠㅜㅎㅋ]+', '', comment)
+        # 1. 특수 기호는 제거하지 않음 (젊은층 톤을 위해 보존)
+        # 과도한 특수 기호만 정리 (3개 이상 연속된 경우만 제거)
+        comment = re.sub(r'[~]{3,}', '~', comment)  # ~~~ 이상은 ~로
+        comment = re.sub(r'[!]{3,}', '!', comment)  # !!! 이상은 !로
+        comment = re.sub(r'[ㅠ]{3,}', 'ㅠㅠ', comment)  # ㅠㅠㅠ 이상은 ㅠㅠ로
+        # ㅎㅋ 같은 이모티콘은 제거 (너무 많으면 부자연스러움)
+        comment = re.sub(r'[ㅎㅋ]{2,}', '', comment)
         
         # 2. 마침표 제거
         comment = re.sub(r'\.+', '', comment)  # 모든 마침표 제거
@@ -1539,6 +1807,35 @@ class MacroBot:
         
         return comment
     
+    def clean_comment_final_only(self, comment: str) -> str:
+        """최종 정리: 중복 어미만 제거하고 특수 기호는 완전히 보존"""
+        import re
+        
+        if not comment:
+            return comment
+        
+        # 특수 기호는 절대 건드리지 않음
+        # 중복 어미만 제거
+        comment = re.sub(r'요요+', '요', comment)
+        comment = re.sub(r'네요요+', '네요', comment)
+        comment = re.sub(r'어요요+', '어요', comment)
+        comment = re.sub(r'해요요+', '해요', comment)
+        comment = re.sub(r'되요요+', '되요', comment)
+        comment = re.sub(r'다요요+', '다요', comment)
+        comment = re.sub(r'야요요+', '야요', comment)
+        comment = re.sub(r'죠요+', '죠', comment)
+        comment = re.sub(r'죠요요+', '죠', comment)
+        
+        # 어미 뒤에 추가 어미가 붙는 경우 제거
+        comment = re.sub(r'(죠|요|네요|어요|해요|되요|다요|야요|까요|나요|세요|지요)(여|요|네요|어요|해요|되요|다요|야요|까요|나요|세요|지요)(\?|$)', r'\1\3', comment)
+        comment = re.sub(r'(죠|요|네요|어요|해요|되요|다요|야요|까요|나요|세요|지요)(여|요|네요|어요|해요|되요|다요|야요|까요|나요|세요|지요)$', r'\1', comment)
+        
+        # 공백 정리만
+        comment = re.sub(r'\s+', ' ', comment)
+        comment = comment.strip()
+        
+        return comment
+    
     async def generate_ai_comment(self, post_content: str, existing_comments: list = None, post_title: str = None) -> str:
         """AI를 사용해서 게시글 제목, 본문과 기존 댓글을 고려하여 관련된 댓글 생성"""
         # 기존 댓글과 본문 정보 저장 (AI 실패 시 사용)
@@ -1579,6 +1876,9 @@ class MacroBot:
         try:
             # 기존 댓글 정보 추가 (최우선 참고)
             if existing_comments and len(existing_comments) > 0:
+                # 기존 댓글 스타일 분석
+                style = self.analyze_comment_style(existing_comments)
+                
                 numbered_comments = "\n".join(
                     [f"{idx + 1}. {c}" for idx, c in enumerate(existing_comments[:8])]
                 )
@@ -1588,7 +1888,25 @@ class MacroBot:
                 comments_text += "2. 위 댓글들의 스타일과 길이를 분석\n"
                 comments_text += "3. 위 댓글들의 감정선과 톤을 파악\n"
                 comments_text += "4. 위 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요\n"
-                comments_text += "5. 본문보다 위 기존 댓글 스타일에 더 중점을 두세요\n"
+                comments_text += "5. 본문보다 위 기존 댓글 스타일에 더 중점을 두세요\n\n"
+                
+                # 분석된 스타일 정보 추가
+                comments_text += f"📊 기존 댓글 스타일 분석 결과:\n"
+                comments_text += f"- 가장 많이 사용된 어미: {style['ending']}\n"
+                comments_text += f"- 자주 사용되는 어미들: {', '.join(style['common_endings'][:3])}\n"
+                comments_text += f"- 평균 댓글 길이: 약 {style['avg_length']}자\n"
+                if style['has_emoji']:
+                    comments_text += f"- 특수 기호 사용: {style['emoji_usage_rate']*100:.0f}%의 댓글이 특수 기호 사용 (~, !, ㅠ 등)\n"
+                    if style['has_tilde']:
+                        comments_text += f"  → 물결표(~) 사용 빈도 높음\n"
+                    if style['has_exclamation']:
+                        comments_text += f"  → 느낌표(!) 사용 빈도 높음\n"
+                    if style['has_ㅠ']:
+                        comments_text += f"  → ㅠ 사용 빈도 높음\n"
+                    comments_text += f"- ⚠️ 중요: 위 기존 댓글들이 특수 기호를 사용한다면, 당신도 비슷한 스타일로 작성하세요.\n"
+                else:
+                    comments_text += f"- 특수 기호 사용: 거의 사용하지 않음 ({style['emoji_usage_rate']*100:.0f}%)\n"
+                    comments_text += f"- ⚠️ 중요: 위 기존 댓글들이 특수 기호를 사용하지 않으므로, 당신도 특수 기호 없이 작성하세요.\n"
             else:
                 comments_text = "\n\n현재 댓글 흐름: (댓글 없음)"
             
@@ -1798,7 +2116,7 @@ class MacroBot:
    - 기존 댓글이 대부분 존댓말이면 존댓말로, 반말이면 반말로 작성
    - 본문 말투는 참고용으로만 사용
 3. 본문의 핵심 키워드를 댓글에 자연스럽게 활용 (선택적)
-4. 이모티콘 절대 사용 금지 (물결표, 느낌표, ㅠㅠ 등 모두 금지)
+4. 특수 기호 사용: 기존 댓글들이 특수 기호(~, !, ㅠ 등)를 사용한다면 그에 맞춰 사용하고, 사용하지 않는다면 사용하지 마세요
 5. 마침표(.) 절대 사용 금지
 6. "용" 어미 절대 사용 금지
 7. 반드시 {max_length}로 완성
@@ -1852,7 +2170,7 @@ class MacroBot:
 - 게시글 내용뿐 아니라 기존 댓글 흐름과도 연관된 댓글이어야 함
 - 반드시 10글자 이내로 완성해야 함 (10글자를 넘기면 안 됨, 잘라내지 말고 처음부터 10글자 이내로 작성)
 - ~입니다 체는 사용하지 말고 ~요 체나 반말체로 작성하되, 본문 말투에 맞춰 결정
-- 이모티콘 절대 사용 금지: 물결표(~), 느낌표(!), "ㅠㅠ" 등 모든 이모티콘/기호를 사용하지 마세요
+- 특수 기호 사용: 기존 댓글들이 특수 기호(~, !, ㅠ 등)를 사용한다면 그에 맞춰 사용하고, 사용하지 않는다면 사용하지 마세요
 - 예: "힘내요" → "힘내요", "좋아요" → "좋아요", "대박이네요" → "대박이네요", "아쉽네요" → "아쉽네요"
 - 격식이 조금 떨어져도 괜찮음, 오히려 더 자연스럽고 친근한 톤으로 작성
 - 자연스럽고 친근한 톤으로 작성
@@ -1876,7 +2194,7 @@ class MacroBot:
 3. ⭐ 세 번째: 본문의 말투와 핵심 키워드를 참고합니다 (선택적).
    - 기존 댓글 스타일을 유지하면서 본문 내용만 참고합니다
    - 본문의 말투는 기존 댓글 말투와 다를 수 있으므로, 기존 댓글 말투를 우선합니다. (생각만, 출력 금지)
-4. 위 세 가지 정보를 합쳐 10글자 이내의 댓글을 설계합니다. 이모티콘은 절대 사용하지 않습니다.
+4. 위 세 가지 정보를 합쳐 10글자 이내의 댓글을 설계합니다. 기존 댓글들이 특수 기호를 사용한다면 그에 맞춰 사용하세요.
 최종 출력은 댓글 한 줄만 해야 하며, 다른 문장은 포함하면 안 됩니다.
 
 금지 사항 (절대 사용 금지):
@@ -1911,7 +2229,7 @@ class MacroBot:
             keywords = self.extract_keywords_from_post(post_content, post_title)
             keywords_text = ""
             if keywords:
-                keywords_text = f"\n\n🔑 본문 핵심 키워드: {', '.join(keywords)}\n- 위 키워드들을 댓글에 자연스럽게 활용하세요.\n- 예: 본문에 '야식'이 있으면 '야식 좋지요'처럼 키워드를 포함한 댓글을 작성하세요.\n- 예: 본문에 '형님'이 있으면 '형님도 굿나잇입니다'처럼 키워드를 활용하세요.\n- 이모티콘은 절대 사용하지 마세요.\n"
+                keywords_text = f"\n\n🔑 본문 핵심 키워드: {', '.join(keywords)}\n- 위 키워드들을 댓글에 자연스럽게 활용하세요.\n- 예: 본문에 '야식'이 있으면 '야식 좋지요'처럼 키워드를 포함한 댓글을 작성하세요.\n- 예: 본문에 '형님'이 있으면 '형님도 굿나잇입니다'처럼 키워드를 활용하세요.\n"
             
             # 질문형 게시글 확인
             is_question = any(q in post_content for q in ['?', '?', '어떻게', '뭐가', '어떤', '언제', '어디', '누가', '왜', '몇시', '몇시쯤'])
@@ -1943,7 +2261,7 @@ class MacroBot:
                     'messages': [
                         {
                             'role': 'system',
-                            'content': '당신은 도박 관련 사이트의 자유게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하지만 자연스러운 댓글을 작성하는 도우미입니다. 자유게시판이므로 도박 관련 얘기뿐만 아니라 일상 수다도 올라올 수 있습니다. 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 댓글을 작성해야 합니다. 가장 중요한 것은: 1) 본문의 말투를 정확히 분석하는 것입니다 (본문이 "~할까요?" 같은 존댓말이면 댓글도 "~요", "~네요" 같은 높임말 사용, 본문이 반말이면 댓글도 반말 사용). 2) 본문의 핵심 키워드를 추출하여 댓글에 자연스럽게 활용하세요 (예: 본문에 "야식"이 있으면 "야식 좋지요"처럼 키워드를 포함). 3) 이모티콘(~, !, ㅠㅠ 등)은 절대 사용하지 마세요. 4) 마침표(.)는 절대 사용하지 마세요. 5) "용" 어미는 절대 사용하지 마세요 (예: "힘내용" ❌ → "힘내요" ✅). 6) 질문형 게시글에서 답을 모르면 댓글을 작성하지 마세요. 7) 기존 댓글들의 말투와 스타일을 분석하여 최대한 비슷하게 작성하세요. 8) 반드시 10글자 이내로 완성하고, 맞춤법을 정확하게 사용하세요. 9) 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 말고, 형식적인 댓글을 사용하지 마세요.'
+                            'content': '당신은 도박 관련 사이트의 자유게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하지만 자연스러운 댓글을 작성하는 도우미입니다. 자유게시판이므로 도박 관련 얘기뿐만 아니라 일상 수다도 올라올 수 있습니다. 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 댓글을 작성해야 합니다. 가장 중요한 것은: 1) 기존 댓글들의 스타일을 우선적으로 분석하고 그에 맞춰 작성하세요. 기존 댓글들이 특수 기호(~, !, ㅠ 등)를 사용한다면 당신도 사용하고, 사용하지 않는다면 사용하지 마세요. 2) 본문의 말투를 정확히 분석하는 것입니다 (본문이 "~할까요?" 같은 존댓말이면 댓글도 "~요", "~네요" 같은 높임말 사용, 본문이 반말이면 댓글도 반말 사용). 3) 본문의 핵심 키워드를 추출하여 댓글에 자연스럽게 활용하세요 (예: 본문에 "야식"이 있으면 "야식 좋지요"처럼 키워드를 포함). 4) 마침표(.)는 절대 사용하지 마세요. 5) "용" 어미는 절대 사용하지 마세요 (예: "힘내용" ❌ → "힘내요" ✅). 6) 질문형 게시글에서 답을 모르면 댓글을 작성하지 마세요. 7) 기존 댓글들의 말투와 스타일을 분석하여 최대한 비슷하게 작성하세요. 8) 반드시 10글자 이내로 완성하고, 맞춤법을 정확하게 사용하세요. 9) 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 말고, 형식적인 댓글을 사용하지 마세요.'
                         },
                         {
                             'role': 'user',
@@ -2130,7 +2448,7 @@ class MacroBot:
    - 기존 댓글이 대부분 존댓말이면 존댓말로, 반말이면 반말로 작성
    - 본문 말투는 참고용으로만 사용
 3. 본문의 핵심 키워드를 댓글에 활용 (선택적): 본문에 나온 주요 단어를 자연스럽게 포함
-4. 이모티콘 절대 사용 금지: 물결표(~), 느낌표(!), "ㅠㅠ" 등 모든 이모티콘/기호 사용하지 마세요
+4. 특수 기호 사용: 기존 댓글들이 특수 기호(~, !, ㅠ 등)를 사용한다면 그에 맞춰 사용하고, 사용하지 않는다면 사용하지 마세요
 5. 마침표(.) 절대 사용 금지
 6. "용" 어미 절대 사용 금지
 7. 질문형 게시글: 답을 모르면 댓글 작성하지 않음
@@ -2154,7 +2472,7 @@ class MacroBot:
 - 친구처럼 편하게 쓴 글 → 친구처럼 편하게 반말이나 캐주얼한 댓글
 - 형식적인 글 → 형식적인 댓글 (하지만 "감사합니다" 같은 금지 단어는 사용하지 말 것)
 - 시답잖은 소리 → 그냥 맞춰주기만 하면 됨 (꼭 긍정적일 필요 없음)
-- 이모티콘 절대 사용 금지: 물결표(~), 느낌표(!), "ㅠㅠ" 등 모든 이모티콘/기호를 사용하지 마세요
+- 특수 기호 사용: 기존 댓글들이 특수 기호(~, !, ㅠ 등)를 사용한다면 그에 맞춰 사용하고, 사용하지 않는다면 사용하지 마세요
 - 예: "힘내요" → "힘내요", "좋아요" → "좋아요", "대박이네요" → "대박이네요", "아쉽네요" → "아쉽네요"
 - 기분 좋은 글이면 담담하게 축하하고, 힘든 글이면 현실적인 톤(예: "아 지치네요", "버텨야죠")도 괜찮음
 - 맞춤법을 반드시 정확하게 사용
@@ -2166,7 +2484,7 @@ class MacroBot:
 추론 절차 (반드시 내부적으로 거친 뒤 마지막에 댓글 한 줄만 출력):
 1. 본문에서 핵심 키워드와 감정을 2개 이상 파악하고 친구에게 말하듯 정리합니다. (생각만, 출력 금지)
 2. 기존 댓글 말투/이모티콘/길이를 분석해 어떤 어미·감정선이 자연스러운지 결정합니다. (생각만, 출력 금지)
-3. 위 정보를 합쳐 10글자 이내 댓글을 설계합니다. 이모티콘은 절대 사용하지 않습니다.
+3. 위 정보를 합쳐 10글자 이내 댓글을 설계합니다. 기존 댓글들이 특수 기호를 사용한다면 그에 맞춰 사용하세요.
 최종 출력은 댓글 한 줄만 해야 하며, 다른 문장은 포함하면 안 됩니다.
 
 {comments_priority_text}게시글 본문:
@@ -2185,7 +2503,7 @@ class MacroBot:
                     'messages': [
                         {
                             'role': 'system',
-                            'content': '당신은 도박 관련 사이트의 자유게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하지만 자연스러운 댓글을 작성하는 도우미입니다. 자유게시판이므로 도박 관련 얘기뿐만 아니라 일상 수다도 올라올 수 있습니다. 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 댓글을 작성해야 합니다. 가장 중요한 것은: 1) 본문의 말투를 정확히 분석하는 것입니다 (본문이 "~할까요?" 같은 존댓말이면 댓글도 "~요", "~네요" 같은 높임말 사용, 본문이 반말이면 댓글도 반말 사용). 2) 본문의 핵심 키워드를 추출하여 댓글에 자연스럽게 활용하세요 (예: 본문에 "야식"이 있으면 "야식 좋지요"처럼 키워드를 포함). 3) 이모티콘(~, !, ㅠㅠ 등)은 절대 사용하지 마세요. 4) 마침표(.)는 절대 사용하지 마세요. 5) "용" 어미는 절대 사용하지 마세요 (예: "힘내용" ❌ → "힘내요" ✅). 6) 질문형 게시글에서 답을 모르면 댓글을 작성하지 마세요. 7) 기존 댓글들의 말투와 스타일을 분석하여 최대한 비슷하게 작성하세요. 8) 반드시 10글자 이내로 완성하고, 맞춤법을 정확하게 사용하세요. 9) 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 말고, 형식적인 댓글을 사용하지 마세요.'
+                            'content': '당신은 도박 관련 사이트의 자유게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하지만 자연스러운 댓글을 작성하는 도우미입니다. 자유게시판이므로 도박 관련 얘기뿐만 아니라 일상 수다도 올라올 수 있습니다. 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 댓글을 작성해야 합니다. 가장 중요한 것은: 1) 기존 댓글들의 스타일을 우선적으로 분석하고 그에 맞춰 작성하세요. 기존 댓글들이 특수 기호(~, !, ㅠ 등)를 사용한다면 당신도 사용하고, 사용하지 않는다면 사용하지 마세요. 2) 본문의 말투를 정확히 분석하는 것입니다 (본문이 "~할까요?" 같은 존댓말이면 댓글도 "~요", "~네요" 같은 높임말 사용, 본문이 반말이면 댓글도 반말 사용). 3) 본문의 핵심 키워드를 추출하여 댓글에 자연스럽게 활용하세요 (예: 본문에 "야식"이 있으면 "야식 좋지요"처럼 키워드를 포함). 4) 마침표(.)는 절대 사용하지 마세요. 5) "용" 어미는 절대 사용하지 마세요 (예: "힘내용" ❌ → "힘내요" ✅). 6) 질문형 게시글에서 답을 모르면 댓글을 작성하지 마세요. 7) 기존 댓글들의 말투와 스타일을 분석하여 최대한 비슷하게 작성하세요. 8) 반드시 10글자 이내로 완성하고, 맞춤법을 정확하게 사용하세요. 9) 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 말고, 형식적인 댓글을 사용하지 마세요.'
                         },
                         {
                             'role': 'user',
@@ -2231,6 +2549,10 @@ class MacroBot:
     
     async def write_comment(self, post_url: str):
         """게시글에 댓글 작성"""
+        print(f"[댓글] ========================================")
+        print(f"[댓글] write_comment 함수 시작: {post_url}")
+        print(f"[댓글] 현재 페이지 URL: {self.page.url}")
+        print(f"[댓글] ========================================")
         try:
             # 페이지가 닫혔는지 확인
             if not self.page or self.page.is_closed():
@@ -2371,11 +2693,12 @@ class MacroBot:
                 print("[오류] 반복 댓글을 회피할 새 문장을 만들지 못했습니다.")
                 return False
             
-            # 어미/기호 다양화
-            comment_text = self.enhance_tone_variation(comment_text, post_content)
+            # 어미/기호 다양화 (젊은층 톤 적용) - 특수 기호 추가 (기존 댓글 스타일 반영)
+            comment_text = self.enhance_tone_variation(comment_text, post_content, existing_comments)
             
-            # 최종 중복 어미 제거 (모든 처리 후 한 번 더)
-            comment_text = self.clean_comment(comment_text)
+            # 최종 중복 어미만 제거 (특수 기호는 보존)
+            # enhance_tone_variation 이후에는 특수 기호를 제거하지 않음
+            comment_text = self.clean_comment_final_only(comment_text)
             
             # 댓글 간 랜덤 대기
             await self.enforce_comment_gap()
@@ -2635,14 +2958,34 @@ class MacroBot:
                     continue
                 
                 # 게시글에 댓글 작성
-                if await self.write_comment(post_url):
+                print(f"[진행] ========================================")
+                print(f"[진행] 게시글 댓글 작성 시도: {post_url}")
+                print(f"[진행] 현재 URL 확인: {self.page.url}")
+                print(f"[진행] 게시판 페이지인지 확인: {'게시판' if self.config['board_url'] in self.page.url else '게시판 아님'}")
+                print(f"[진행] ========================================")
+                
+                # 댓글 작성 함수 호출
+                print(f"[진행] write_comment 함수 호출 시작...")
+                comment_result = await self.write_comment(post_url)
+                print(f"[진행] write_comment 함수 호출 완료. 결과: {comment_result}")
+                
+                if comment_result:
                     success_count += 1
                     processed_urls.add(post_url)
+                    print(f"[성공] 댓글 작성 완료! (성공: {success_count}/{max_posts})")
                 else:
-                    print("[경고] 댓글 작성에 실패했습니다. 다음 게시글을 시도합니다.")
+                    print(f"[경고] 댓글 작성에 실패했습니다. 다음 게시글을 시도합니다. (실패한 URL: {post_url})")
                 
-                # 게시판으로 돌아가기
+                # 댓글 작성 후 반드시 게시판으로 돌아가기
+                print(f"[게시판] 댓글 작성 후 게시판 복귀 전 URL: {self.page.url}")
                 await self.go_back_to_board()
+                print(f"[게시판] 게시판 복귀 후 URL: {self.page.url}")
+                
+                # 게시판 복귀 확인
+                if self.config['board_url'] not in self.page.url:
+                    print(f"[경고] 게시판 복귀 실패! 강제로 게시판으로 이동합니다.")
+                    await self.page.goto(self.config['board_url'], wait_until='networkidle')
+                    await self.random_delay(2, 4)
                 
                 # 다음 게시글 전 대기
                 if success_count < max_posts:
@@ -2687,8 +3030,8 @@ def load_config():
         'comment_gap_min': int(os.getenv('COMMENT_GAP_MIN', '1')),
         'comment_gap_max': int(os.getenv('COMMENT_GAP_MAX', '10')),
         'min_repeat_interval_sec': int(os.getenv('MIN_REPEAT_INTERVAL_SEC', '900')),
-        # 게시글 처리 순서: 'latest' (최신순) 또는 'random' (랜덤)
-        'post_order': os.getenv('POST_ORDER', 'latest'),
+        # 게시글 처리 순서: 'latest' (최신순), 'oldest' (오래된순), 또는 'random' (랜덤)
+        'post_order': os.getenv('POST_ORDER', 'random'),
         # OpenAI API 키 (선택사항, 없으면 기본 댓글 사용)
         'openai_api_key': os.getenv('OPENAI_API_KEY', ''),
         # Gemini API 키 제거됨 - OpenAI만 사용
@@ -2704,12 +3047,51 @@ def load_config():
 
 async def main():
     """메인 함수"""
-    # 브라우저 자동 설치 확인 (경고 무시 - sync API를 async 함수에서 호출하지만 문제없음)
+    # 브라우저 자동 설치 확인 (별도 스레드에서 실행하여 asyncio 루프와 충돌 방지)
     try:
-        ensure_playwright_browser()
+        # sync API를 별도 스레드에서 실행 (Python 3.9+)
+        # Python 3.7-3.8 호환성을 위해 loop.run_in_executor 사용
+        loop = asyncio.get_event_loop()
+        browser_ok = await loop.run_in_executor(None, ensure_playwright_browser)
+        
+        if not browser_ok:
+            print()
+            print("=" * 60)
+            print("[경고] 브라우저 확인에 실패했습니다.")
+            print("=" * 60)
+            print()
+            print("프로그램을 계속 실행하지만 브라우저 관련 오류가 발생할 수 있습니다.")
+            print("브라우저 설치 문제를 해결하려면:")
+            print("  1. 터미널에서 다음 명령어 실행: python -m playwright install chromium")
+            print("  2. 또는 '브라우저_설치.bat' 파일을 실행하세요 (있는 경우)")
+            print()
+            user_input = input("계속 진행하시겠습니까? (y/n): ").strip().lower()
+            if user_input != 'y':
+                print("프로그램을 종료합니다.")
+                return
+            print()
     except Exception as e:
-        # 경고는 무시하고 계속 진행
-        pass
+        error_msg = str(e)
+        if "platform independent libraries" in error_msg or "prefix" in error_msg.lower():
+            print()
+            print("=" * 60)
+            print("[오류] Python 환경 문제가 감지되었습니다.")
+            print("=" * 60)
+            print()
+            print("해결 방법:")
+            print("1. Python을 재설치하세요 (https://www.python.org/downloads/)")
+            print("2. 다음 명령어로 Playwright 브라우저를 수동 설치하세요:")
+            print("   python -m playwright install chromium")
+            print()
+            print("3. 가상 환경을 사용하는 경우:")
+            print("   - 가상 환경을 비활성화하고 다시 시도하세요")
+            print("   - 또는 새로운 가상 환경을 만들고 다시 설치하세요")
+            print()
+            print("=" * 60)
+            return
+        else:
+            print(f"[경고] 브라우저 확인 중 오류: {e}")
+            print("[경고] 계속 진행하지만 문제가 발생할 수 있습니다.")
     
     config = load_config()
     

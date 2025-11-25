@@ -28,3 +28,4 @@ python AI_학습_시스템.py
 
 pause
 
+
