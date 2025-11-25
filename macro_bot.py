@@ -34,6 +34,7 @@ class MacroBot:
         self.config = config
         self.browser: Browser = None
         self.page: Page = None
+        self.playwright = None
         self.commented_posts_file = 'commented_posts.txt'  # 댓글 작성한 게시글 목록 파일
         self.commented_posts = self.load_commented_posts()  # 이미 댓글 작성한 게시글 목록
         self.current_page = 1  # 현재 보고 있는 게시판 페이지
@@ -115,14 +116,23 @@ class MacroBot:
         return any(keyword in text for keyword in negative_keywords)
 
     def enhance_tone_variation(self, comment_text: str, post_content: str = '') -> str:
-        """물결/느낌표/ㅠㅠ 등을 다양하게 섞고 존댓말을 가볍게 추가"""
+        """물결/느낌표/ㅠㅠ 등을 다양하게 섞되 과한 특수문자 사용은 제한"""
         if not comment_text:
             return comment_text
         comment = comment_text.strip()
         
+        # 특수 문자 개수 제한
+        special_chars = ['~', '!', 'ㅠ', 'ㅜ']
+        special_count = sum(comment.count(ch) for ch in special_chars)
+        if special_count > 2:
+            for ch in special_chars:
+                while comment.count(ch) > 1:
+                    comment = comment.replace(ch, '', 1)
+        
         # 존댓말 섞기 (너무 반말만 나오는 것 방지)
         if '요' not in comment and random.random() < 0.4:
-            suffix = '요' if comment.endswith('~') else '요~'
+            suffix_options = ['요', '요~', '용', '요!']
+            suffix = random.choice(suffix_options)
             if len(comment) + len(suffix) <= 10:
                 comment += suffix
             elif len(comment) < 10:
@@ -133,7 +143,7 @@ class MacroBot:
         # 특수 기호 다양화
         if not any(ch in comment for ch in ['~', '!', 'ㅠ']):
             if self._is_negative_content(post_content or comment):
-                candidate = random.choice(['ㅠㅠ', 'ㅠ'])
+                candidate = random.choice(['ㅠ', 'ㅠㅠ'])
             else:
                 candidate = random.choice(['~', '!'])
             if len(comment) + len(candidate) <= 10:
@@ -143,10 +153,14 @@ class MacroBot:
             else:
                 comment = comment[:-len(candidate)] + candidate
         
-        # 중복된 물결만 있을 경우 느낌표/ㅠㅠ 추가
-        if comment.endswith('~~') or comment.count('~') >= 2:
-            alt = random.choice(['~!', '!'])
-            comment = comment[:-1] + alt if len(comment) == 10 else comment[:-2] + alt
+        # 중복된 물결/느낌표 정리
+        while '~~' in comment:
+            comment = comment.replace('~~', '~')
+        while '!!' in comment:
+            comment = comment.replace('!!', '!')
+        
+        if comment.endswith('~') and random.random() < 0.3:
+            comment = comment[:-1] + random.choice(['~!', '요~', '요!'])
         
         return comment[:10]
 
@@ -250,8 +264,9 @@ class MacroBot:
     
     async def init_browser(self, headless: bool = False):
         """브라우저 초기화"""
-        playwright = await async_playwright().start()
-        self.browser = await playwright.chromium.launch(
+        if not self.playwright:
+            self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
             headless=headless,
             slow_mo=500  # 동작을 천천히 (디버깅용)
         )
@@ -260,6 +275,33 @@ class MacroBot:
         await self.page.set_extra_http_headers({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
+
+    async def reset_browser(self, headless: bool = False):
+        """브라우저를 완전히 재시작"""
+        print("[브라우저] 브라우저를 재시작합니다.")
+        try:
+            if self.page and not self.page.is_closed():
+                await self.page.close()
+        except Exception as e:
+            print(f"[브라우저] 페이지 종료 중 오류: {e}")
+        try:
+            if self.browser:
+                await self.browser.close()
+        except Exception as e:
+            print(f"[브라우저] 브라우저 종료 중 오류: {e}")
+        try:
+            if self.playwright:
+                await self.playwright.stop()
+        except Exception as e:
+            print(f"[브라우저] Playwright 종료 중 오류: {e}")
+        finally:
+            self.playwright = None
+        await self.init_browser(headless=headless)
+        if not await self.login():
+            raise RuntimeError("브라우저 재시작 후 로그인에 실패했습니다.")
+        self.current_page = 1
+        self.page_direction = 1
+        await self.navigate_to_board_page(self.current_page)
     
     async def login(self):
         """사이트에 로그인"""
@@ -977,9 +1019,13 @@ class MacroBot:
         
         try:
             # 기존 댓글 정보 추가
-            comments_text = ""
             if existing_comments and len(existing_comments) > 0:
-                comments_text = "\n\n기존 댓글들:\n" + "\n".join([f"- {c}" for c in existing_comments[:5]])
+                numbered_comments = "\n".join(
+                    [f"{idx + 1}. {c}" for idx, c in enumerate(existing_comments[:8])]
+                )
+                comments_text = f"\n\n현재 댓글 흐름 (최근 {min(len(existing_comments), 8)}개):\n{numbered_comments}\n\n위 댓글들의 말투와 감정선, 이모티콘 빈도를 참고해 자연스럽게 이어주세요."
+            else:
+                comments_text = "\n\n현재 댓글 흐름: (댓글 없음)"
             
             # 프롬프트 작성
             prompt = f"""다음 게시글 본문과 기존 댓글들을 읽고, 작성자의 감정에 공감하는 자연스러운 댓글을 작성해주세요.
@@ -999,11 +1045,11 @@ class MacroBot:
 - 슬프거나 힘든 글 → "힘내~", "공감해~", "위로해~", "아쉽네~"
 - 게시판이 도박 관련이라는 맥락을 고려하되, 게시글 내용과 톤에 맞는 댓글 작성
 - 절대 형식적인 댓글을 사용하지 말 것 (예: "좋은 글 감사합니다", "좋은 정보 감사합니다", "유용한 정보네요", "잘 읽었습니다" 등)
-- 게시글 내용과 기존 댓글들과 연관된 댓글이어야 함
-- 기존 댓글과 비슷한 톤과 스타일로 작성
+- 게시글 내용뿐 아니라 기존 댓글 흐름과도 연관된 댓글이어야 함
+- 기존 댓글과 자연스럽게 이어지는 톤과 스타일로 작성 (말투·이모티콘 빈도를 맞추기)
 - 반드시 10글자 이내로 완성해야 함 (10글자를 넘기면 안 됨, 잘라내지 말고 처음부터 10글자 이내로 작성)
 - ~입니다 체는 사용하지 말고 ~요 체나 반말체로 작성하되, 너무 반말만 쓰지 말고 "~요", "~용", "~요!"처럼 적당히 섞어서 사용
-- 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호를 다양하게 섞어서 사용 (예: "~요!", "~!", "ㅠㅠ")
+- 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호를 상황에 맞게 0~1회만 사용 (매크로 티 안 나게)
 - 예: "힘내요" → "힘내용~", "좋아요" → "좋아~", "대박이네요" → "대박~", "아쉽네요" → "아쉽네ㅠㅠ"
 - 격식이 조금 떨어져도 괜찮음, 오히려 더 자연스럽고 친근한 톤으로 작성
 - 자연스럽고 친근한 톤으로 작성
@@ -1015,8 +1061,8 @@ class MacroBot:
 
 추론 절차 (반드시 내부적으로 거친 뒤 마지막에 댓글 한 줄만 출력):
 1. 본문에서 핵심 키워드와 감정을 2개 이상 파악하고, 그 감정을 친구에게 설명하듯 요약합니다. (생각만, 출력 금지)
-2. 기존 댓글들의 말투/이모티콘/길이 패턴을 분석해 어떤 어미가 자연스러운지 결정합니다. (생각만, 출력 금지)
-3. 위 두 정보를 합쳐 10글자 이내의 댓글을 설계합니다. 물결표/느낌표 사용 여부도 함께 결정합니다.
+2. 기존 댓글들의 말투/이모티콘/길이 패턴을 분석해 어떤 어미가 자연스럽고 어떤 감정선이 이어지는지 결정합니다. (생각만, 출력 금지)
+3. 위 두 정보를 합쳐 10글자 이내의 댓글을 설계합니다. 물결표/느낌표 사용 여부도 함께 결정하되 과하게 반복하지 않습니다.
 최종 출력은 댓글 한 줄만 해야 하며, 다른 문장은 포함하면 안 됩니다.
 
 금지 사항 (절대 사용 금지):
@@ -1050,7 +1096,7 @@ class MacroBot:
                     'messages': [
                         {
                             'role': 'system',
-                            'content': '당신은 도박 관련 게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하고 캐주얼한 댓글을 작성하는 도우미입니다. 작성자가 친구처럼 편하게 썼다면 친구처럼 편하게, 형식적으로 썼다면 형식적으로, 시답잖은 소리면 그냥 맞춰주기만 하면 됩니다. 꼭 긍정적이거나 위로할 필요 없습니다. 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호를 다양하게 섞어서 사용하세요(예: "~요!", "~!", "아쉽네ㅠㅠ"). "~요", "~용", "~요!" 같은 가벼운 존댓말도 적절히 섞어서 너무 반말만 사용하지 않도록 합니다. 기분 좋은 글인데 할말 없을 땐 "데헿~", "ㅎㅎ~" 같은 가벼운 댓글도 괜찮습니다. 반드시 10글자 이내로 완성해야 합니다 (10글자를 넘기면 안 됩니다). 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 마세요. 절대 형식적인 댓글("좋은 글 감사합니다", "유용한 정보네요" 등)을 사용하지 마세요.'
+                            'content': '당신은 도박 관련 게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하고 캐주얼한 댓글을 작성하는 도우미입니다. 작성자가 친구처럼 편하게 썼다면 친구처럼 편하게, 형식적으로 썼다면 형식적으로, 시답잖은 소리면 그냥 맞춰주기만 하면 됩니다. 꼭 긍정적이거나 위로할 필요 없습니다. 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호는 상황에 맞게 0~1회만 사용해 과도하게 반복되지 않도록 하세요. "~요", "~용", "~요!" 같은 가벼운 존댓말도 적절히 섞어서 너무 반말만 사용하지 않도록 합니다. 기분 좋은 글인데 할말 없을 땐 "데헿~", "ㅎㅎ~" 같은 가벼운 댓글도 괜찮습니다. 반드시 10글자 이내로 완성해야 합니다 (10글자를 넘기면 안 됩니다). 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 마세요. 절대 형식적인 댓글("좋은 글 감사합니다", "유용한 정보네요" 등)을 사용하지 마세요.'
                         },
                         {
                             'role': 'user',
@@ -1194,9 +1240,13 @@ class MacroBot:
         api_key = self.config.get('openai_api_key')
         
         try:
-            comments_text = ""
             if existing_comments and len(existing_comments) > 0:
-                comments_text = "\n\n기존 댓글들:\n" + "\n".join([f"- {c}" for c in existing_comments[:5]])
+                numbered_comments = "\n".join(
+                    [f"{idx + 1}. {c}" for idx, c in enumerate(existing_comments[:8])]
+                )
+                comments_text = f"\n\n현재 댓글 흐름 (최근 {min(len(existing_comments), 8)}개):\n{numbered_comments}\n\n위 댓글들의 말투와 감정선, 이모티콘 빈도를 참고해 자연스럽게 이어주세요."
+            else:
+                comments_text = "\n\n현재 댓글 흐름: (댓글 없음)"
             
             # 더 강력한 프롬프트
             prompt = f"""다음 게시글 본문을 읽고, 작성자의 감정에 공감하는 댓글을 작성해주세요.
@@ -1224,18 +1274,18 @@ class MacroBot:
 - 친구처럼 편하게 쓴 글 → 친구처럼 편하게 반말이나 캐주얼한 댓글
 - 형식적인 글 → 형식적인 댓글 (하지만 "감사합니다" 같은 금지 단어는 사용하지 말 것)
 - 시답잖은 소리 → 그냥 맞춰주기만 하면 됨 (꼭 긍정적일 필요 없음)
-- 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호를 다양하게 섞어서 사용 (예: "~요!", "~!", "ㅠㅠ")
+- 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호를 상황에 맞게 0~1회만 사용 (과도하게 반복하지 말 것)
 - 예: "힘내요" → "힘내용~", "좋아요" → "좋아~", "대박이네요" → "대박~", "아쉽네요" → "아쉽네ㅠㅠ"
 - 기분 좋은 글인데 할말 없을 땐 "데헿~", "ㅎㅎ~", "좋아~" 같은 가벼운 댓글도 괜찮음
 - 게시판이 도박 관련이라는 맥락을 고려
-- 게시글 내용과 직접적으로 관련된 댓글
+- 게시글 내용과 기존 댓글 흐름 모두에 자연스럽게 이어지는 댓글
 - 반드시 10글자 이내로 완성해야 함 (10글자를 넘기면 안 됨)
 - ~요 체나 반말체를 적절히 섞어서 사용 (너무 반말만 쓰지 않기)
 
 추론 절차 (반드시 내부적으로 거친 뒤 마지막에 댓글 한 줄만 출력):
 1. 본문에서 핵심 키워드와 감정을 2개 이상 파악하고 친구에게 말하듯 정리합니다. (생각만, 출력 금지)
-2. 기존 댓글 말투/이모티콘/길이를 분석해 어떤 어미가 자연스러운지 결정합니다. (생각만, 출력 금지)
-3. 위 정보를 합쳐 10글자 이내 댓글을 설계하고 물결표/느낌표 사용 여부를 정합니다.
+2. 기존 댓글 말투/이모티콘/길이를 분석해 어떤 어미·감정선이 자연스러운지 결정합니다. (생각만, 출력 금지)
+3. 위 정보를 합쳐 10글자 이내 댓글을 설계하고 물결표/느낌표 사용 여부를 정하되, 과하게 반복하지 않습니다.
 최종 출력은 댓글 한 줄만 해야 하며, 다른 문장은 포함하면 안 됩니다.
 
 게시글 본문:
@@ -1254,7 +1304,7 @@ class MacroBot:
                     'messages': [
                         {
                             'role': 'system',
-                            'content': '당신은 도박 관련 게시판에서 게시글 작성자의 감정에 공감하는 친근한 댓글을 작성하는 도우미입니다. 작성자가 친구처럼 편하게 썼다면 친구처럼 편하게, 형식적으로 썼다면 형식적으로, 시답잖은 소리면 그냥 맞춰주기만 하면 됩니다. 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호를 다양하게 섞어 사용하고, "~요", "~용", "~요!" 같은 가벼운 존댓말도 적절히 섞어 너무 반말만 나오지 않게 해주세요. 게시판의 맥락을 고려하면서도 게시글 내용에 맞는 댓글을 작성해야 합니다. 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 마세요. 절대 형식적인 댓글("좋은 글 감사합니다", "유용한 정보네요" 등)을 사용하지 마세요. 반드시 게시글 내용과 감정에 관련된 댓글이어야 합니다.'
+                            'content': '당신은 도박 관련 게시판에서 게시글 작성자의 감정에 공감하는 친근한 댓글을 작성하는 도우미입니다. 작성자가 친구처럼 편하게 썼다면 친구처럼 편하게, 형식적으로 썼다면 형식적으로, 시답잖은 소리면 그냥 맞춰주기만 하면 됩니다. 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호는 상황에 맞게 0~1회만 사용하고, "~요", "~용", "~요!" 같은 가벼운 존댓말도 적절히 섞어 너무 반말만 나오지 않게 해주세요. 게시판의 맥락을 고려하면서도 게시글 내용에 맞는 댓글을 작성해야 합니다. 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 마세요. 절대 형식적인 댓글("좋은 글 감사합니다", "유용한 정보네요" 등)을 사용하지 마세요. 반드시 게시글 내용과 감정에 관련된 댓글이어야 합니다.'
                         },
                         {
                             'role': 'user',
@@ -1299,12 +1349,25 @@ class MacroBot:
             # 페이지가 닫혔는지 확인
             if not self.page or self.page.is_closed():
                 print("[오류] 페이지가 이미 닫혔습니다. 브라우저를 다시 초기화합니다.")
-                await self.init_browser(headless=False)
-                await self.login()
-                await self.page.goto(self.config['board_url'], wait_until='networkidle')
+                await self.reset_browser(headless=False)
             
             print(f"[댓글] {post_url} 접속 중...")
-            await self.page.goto(post_url, wait_until='networkidle')
+            try:
+                await self.page.goto(post_url, wait_until='networkidle')
+            except AttributeError as attr_err:
+                if "_object" in str(attr_err):
+                    print("[오류] 페이지 객체가 손상되었습니다. 브라우저를 재시작합니다.")
+                    await self.reset_browser(headless=False)
+                    await self.page.goto(post_url, wait_until='networkidle')
+                else:
+                    raise
+            except Exception as goto_error:
+                if "_object" in str(goto_error):
+                    print("[오류] 페이지 이동 중 Playwright 채널 오류가 발생했습니다. 브라우저를 재시작합니다.")
+                    await self.reset_browser(headless=False)
+                    await self.page.goto(post_url, wait_until='networkidle')
+                else:
+                    raise
             await self.random_delay(2, 4)
             
             # 페이지 로드 확인
@@ -1418,9 +1481,93 @@ class MacroBot:
             await self.random_delay(1, 2)
             
             # 댓글 작성 버튼 클릭
-            submit_button_selector = self.config.get('submit_button_selector', 'button[type="submit"]')
-            await self.page.wait_for_selector(submit_button_selector, timeout=10000)
-            await self.page.click(submit_button_selector)
+            submit_button_candidates = self.config.get(
+                'submit_button_selector',
+                'input#btn_submit, #btn_submit, input.btn_submit, button.btn_submit, button[type="submit"], input[type="submit"]'
+            )
+            
+            selector_list = [s.strip() for s in submit_button_candidates.split(',') if s.strip()]
+            # 필수 기본 후보들 추가
+            selector_list.extend([
+                '#btn_submit', 'input#btn_submit', 'input[value="댓글등록"]',
+                'input[value*="댓글"]', 'button#btn_submit', 'button.btn_submit'
+            ])
+            
+            submit_button = None
+            last_selector = None
+            for selector in selector_list:
+                last_selector = selector
+                try:
+                    await self.page.wait_for_selector(selector, timeout=3000, state='visible')
+                    submit_button = await self.page.query_selector(selector)
+                except Exception:
+                    submit_button = None
+                if submit_button:
+                    break
+            
+            if not submit_button:
+                raise RuntimeError(f"댓글 등록 버튼을 찾을 수 없습니다. 마지막 시도 선택자: {last_selector}")
+            
+            print(f"[댓글] 등록 버튼 선택자: {last_selector}")
+            
+            await submit_button.scroll_into_view_if_needed()
+            await self.random_delay(0.3, 0.6)
+            print("[댓글] 등록 버튼 클릭 시도")
+            
+            clicked = False
+            try:
+                await submit_button.hover()
+                await submit_button.click(force=True, timeout=5000)
+                clicked = True
+            except Exception as click_error:
+                print(f"[경고] 기본 클릭 실패: {click_error}")
+            
+            if not clicked:
+                print("[댓글] 클릭 실패로 JavaScript 이벤트를 직접 호출합니다.")
+                await self.page.eval_on_selector(
+                    last_selector,
+                    """(btn) => {
+                        btn.removeAttribute('disabled');
+                        if (btn.click) {
+                            btn.click();
+                        } else if (btn.form) {
+                            btn.form.submit();
+                        }
+                    }"""
+                )
+            
+            # 버튼 클릭이 제대로 되었는지 확인 (폼 제출/댓글 반영 대기)
+            try:
+                await self.page.wait_for_function(
+                    """(inputSelector) => {
+                        const input = document.querySelector(inputSelector);
+                        if (!input) return false;
+                        if ((input.value || '').trim().length === 0) return true;
+                        const form = input.closest('form');
+                        if (form && form.dataset.submitVisualized === 'done') return true;
+                        const btn = document.querySelector('#btn_submit, input#btn_submit, button#btn_submit');
+                        if (btn && btn.dataset.clicked) return true;
+                        return false;
+                    }""",
+                    comment_input_selector,
+                    timeout=5000
+                )
+            except Exception:
+                # 입력창이 그대로면 잠시 더 대기하고 최후에 폼 직접 제출
+                await self.random_delay(0.5, 1.0)
+                try:
+                    await self.page.eval_on_selector(
+                        comment_input_selector,
+                        """(input) => {
+                            const form = input.closest('form');
+                            if (form) {
+                                form.submit();
+                                form.dataset.submitVisualized = 'done';
+                            }
+                        }"""
+                    )
+                except Exception as submit_err:
+                    print(f"[경고] 폼 강제 제출 중 오류: {submit_err}")
             
             # 제출 완료 대기
             await self.random_delay(2, 4)
@@ -1529,6 +1676,8 @@ class MacroBot:
         finally:
             if self.browser:
                 await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
 
 
 def load_config():
@@ -1564,7 +1713,7 @@ def load_config():
         'login_button_selector': os.getenv('LOGIN_BUTTON_SELECTOR', 'button[type="submit"]'),
         'post_link_selector': os.getenv('POST_LINK_SELECTOR', 'a.post-link'),
         'comment_input_selector': os.getenv('COMMENT_INPUT_SELECTOR', 'textarea[name="comment"]'),
-        'submit_button_selector': os.getenv('SUBMIT_BUTTON_SELECTOR', 'button[type="submit"]'),
+        'submit_button_selector': os.getenv('SUBMIT_BUTTON_SELECTOR', 'input#btn_submit, #btn_submit, input.btn_submit, button.btn_submit, button[type="submit"], input[type="submit"]'),
     }
 
 
