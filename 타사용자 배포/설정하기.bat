@@ -13,18 +13,16 @@ if exist .env (
     REM Python이 있는지 확인하고 update_env.py 실행
     python --version >nul 2>&1
     if not errorlevel 1 (
-        if exist update_env.py (
-            echo MAX_POSTS와 OPENAI_API_KEY를 기본값으로 업데이트합니다...
+        echo MAX_POSTS와 OPENAI_API_KEY를 기본값으로 업데이트합니다...
+        echo.
+        
+        python update_env.py
+        
+        if errorlevel 1 (
+            echo [경고] 자동 업데이트 실패. 수동으로 수정해주세요.
             echo.
-            
-            python update_env.py
-            
-            if errorlevel 1 (
-                echo [경고] 자동 업데이트 실패. 수동으로 수정해주세요.
-                echo.
-            ) else (
-                echo.
-            )
+        ) else (
+            echo.
         )
     ) else (
         echo [알림] Python이 설치되어 있지 않아 자동 업데이트를 건너뜁니다.
@@ -51,10 +49,6 @@ if exist .env.example (
     set ENV_EXAMPLE=env.example
 ) else (
     echo [오류] .env.example 또는 env.example 파일을 찾을 수 없습니다.
-    echo.
-    echo "타사용자 배포" 폴더에서 env.example 파일을 복사하거나,
-    echo 직접 .env 파일을 만들어주세요.
-    echo.
     pause
     exit /b 1
 )
@@ -82,7 +76,8 @@ if exist .env (
     echo    - LOGIN_USERNAME (아이디)
     echo    - PASSWORD (비밀번호)
     echo 3. 선택 항목 수정 (AI 댓글 사용 시):
-    echo    - OPENAI_API_KEY (이미 기본값으로 설정됨)
+    echo    - GEMINI_API_KEY (무료, 추천!)
+    echo    - OPENAI_API_KEY (유료, 선택사항)
     echo 4. 저장
     echo.
     echo .env 파일을 지금 열까요? (Y/N)
@@ -99,12 +94,20 @@ if exist .env (
         echo 2. PASSWORD=INPUT_YOUR_PASSWORD_HERE 부분에 비밀번호 입력
         echo.
         echo ========================================
-        echo [참고]
+        echo [선택 설정 - AI 댓글 사용 시]
         echo ========================================
-        echo - MAX_POSTS와 OPENAI_API_KEY는 이미 기본값으로 설정되어 있습니다.
-        echo - 아이디와 비밀번호만 입력하면 됩니다.
+        echo 3. GEMINI_API_KEY= 부분에 Gemini API 키 입력 (무료, 추천!)
+        echo    발급 주소: https://makersuite.google.com/app/apikey
         echo.
-        echo 3. 저장 (Ctrl + S)
+        echo 4. OPENAI_API_KEY= 부분에 OpenAI API 키 입력 (유료, 선택사항)
+        echo    발급 주소: https://platform.openai.com/api-keys
+        echo.
+        echo [참고]
+        echo - AI API 키를 입력하지 않으면 기본 댓글이 사용됩니다.
+        echo - Gemini API는 무료이므로 추천합니다!
+        echo - OpenAI API는 유료이지만 할당량이 초과되면 자동으로 Gemini로 전환됩니다.
+        echo.
+        echo 5. 저장 (Ctrl + S)
         echo.
         pause
         notepad .env
@@ -113,6 +116,7 @@ if exist .env (
         echo .env 파일을 직접 열어서 수정하세요.
         echo.
         echo [필수] LOGIN_USERNAME, PASSWORD 입력
+        echo [선택] GEMINI_API_KEY, OPENAI_API_KEY 입력 (AI 댓글 사용 시)
     )
 ) else (
     echo [오류] .env 파일 생성 실패
@@ -123,3 +127,4 @@ if exist .env (
 echo.
 echo 설정이 완료되면 프로그램을 실행하세요!
 pause
+

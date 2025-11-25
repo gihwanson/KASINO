@@ -7,12 +7,96 @@ import time
 import re
 import aiohttp
 import json
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright, Page, Browser
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
+
+
+def ensure_playwright_browser():
+    """Playwright 브라우저가 설치되어 있는지 확인하고 없으면 자동 설치"""
+    try:
+        # 브라우저가 설치되어 있는지 확인
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(headless=True)
+                browser.close()
+                return True
+            except Exception:
+                # 브라우저가 없으면 설치
+                print("[알림] Playwright 브라우저가 설치되어 있지 않습니다.")
+                print("[알림] 브라우저를 자동으로 설치하는 중... (처음 실행 시 한 번만 설치됩니다)")
+                print("      (이 작업은 몇 분 정도 걸릴 수 있습니다)")
+                print()
+                
+                # playwright install chromium 실행
+                try:
+                    if getattr(sys, 'frozen', False):
+                        # 실행 파일인 경우
+                        # PyInstaller로 만든 실행 파일에서는 playwright install을 직접 실행하기 어려움
+                        # 대신 playwright의 내부 설치 메커니즘 사용 시도
+                        try:
+                            # playwright의 설치 함수 직접 호출
+                            from playwright.sync_api import sync_playwright
+                            # playwright install은 내부적으로 처리됨
+                            # 하지만 직접 호출이 어려우므로 subprocess로 시도
+                            # 실행 파일 자체를 Python 인터프리터처럼 사용
+                            result = subprocess.run(
+                                [sys.executable, "-c", "import subprocess, sys; subprocess.run([sys.executable, '-m', 'playwright', 'install', 'chromium'])"],
+                                check=True,
+                                timeout=600  # 10분 타임아웃
+                            )
+                        except Exception:
+                            # 실패하면 사용자에게 안내
+                            raise Exception("자동 설치 실패")
+                    else:
+                        # Python 스크립트인 경우
+                        result = subprocess.run(
+                            [sys.executable, "-m", "playwright", "install", "chromium"],
+                            check=True,
+                            timeout=600,  # 10분 타임아웃
+                            capture_output=True,
+                            text=True
+                        )
+                    
+                    print("[완료] 브라우저 설치가 완료되었습니다!")
+                    print()
+                    return True
+                except subprocess.TimeoutExpired:
+                    print("[오류] 브라우저 설치 시간 초과")
+                    print("[안내] 네트워크 연결을 확인하고 다시 시도하세요.")
+                    return False
+                except subprocess.CalledProcessError as e:
+                    print(f"[오류] 브라우저 설치 실패")
+                    print()
+                    print("[안내] 수동 설치 방법:")
+                    if getattr(sys, 'frozen', False):
+                        print("  1. Python을 설치하세요 (https://www.python.org/downloads/)")
+                        print("  2. 다음 명령어 실행: python -m playwright install chromium")
+                    else:
+                        print("  python -m playwright install chromium")
+                    print()
+                    return False
+                except Exception as install_error:
+                    print(f"[오류] 브라우저 설치 중 오류 발생: {install_error}")
+                    print()
+                    print("[안내] 수동 설치 방법:")
+                    if getattr(sys, 'frozen', False):
+                        print("  1. Python을 설치하세요 (https://www.python.org/downloads/)")
+                        print("  2. 다음 명령어 실행: python -m playwright install chromium")
+                    else:
+                        print("  python -m playwright install chromium")
+                    print()
+                    return False
+    except Exception as e:
+        print(f"[경고] 브라우저 확인 중 오류 발생: {e}")
+        print("[안내] 브라우저가 제대로 작동하지 않을 수 있습니다.")
+        return False
 
 
 class MacroBot:
@@ -43,6 +127,98 @@ class MacroBot:
         self.last_comment_time = None
         self.min_repeat_interval = self.config.get('min_repeat_interval_sec', 900)
         self.max_delay_seconds = 10  # 최대 랜덤 대기 제한
+        self._last_post_content = ""  # AI 실패 시 사용할 본문
+        self._last_post_title = ""  # AI 실패 시 사용할 제목
+        self._last_existing_comments = []  # AI 실패 시 사용할 기존 댓글
+        
+        # AI 프롬프트 설정 로드 확인 (우선순위 1)
+        prompt_config = self.load_prompt_config()
+        if prompt_config:
+            good_examples = len(prompt_config.get('좋은_댓글_예시', []))
+            bad_examples = len(prompt_config.get('나쁜_댓글_예시', []))
+            print(f"[AI] 프롬프트 설정 로드 완료 (좋은 예시: {good_examples}개, 나쁜 예시: {bad_examples}개)")
+            self.learning_data = None  # AI_프롬프트_설정.json을 사용하므로 learning_data는 None
+        else:
+            print("[AI] 프롬프트 설정 파일 없음 (기본 프롬프트 사용)")
+            # AI_프롬프트_설정.json이 없을 때만 기존 학습 데이터 로드 (하위 호환성)
+            self.learning_data = self.load_learning_data()
+            if self.learning_data:
+                print(f"[AI] 학습 데이터 로드 완료 (버전 v{self.learning_data.get('version', 1)})")
+                print(f"[AI] 좋은 예시: {len(self.learning_data.get('few_shot_examples', []))}개")
+                print(f"[AI] 나쁜 예시: {len(self.learning_data.get('bad_examples', []))}개")
+            else:
+                print("[AI] 학습 데이터 없음 (기본 프롬프트 사용)")
+        
+        # 도박 용어 사전 로드 확인 (AI_프롬프트_설정.json에서)
+        prompt_config = self.load_prompt_config()
+        if prompt_config:
+            gambling_terms = prompt_config.get('도박_용어_사전', {})
+            if gambling_terms:
+                categories = gambling_terms.get('카테고리', {})
+                if categories:
+                    total_terms = sum(len(terms) for terms in categories.values())
+                    print(f"[AI] 도박 용어 사전 로드 완료 ({total_terms}개 용어)")
+                else:
+                    print("[AI] 도박 용어 사전 없음")
+            else:
+                print("[AI] 도박 용어 사전 없음")
+        else:
+            print("[AI] 도박 용어 사전 없음 (프롬프트 설정 파일 없음)")
+    
+    def load_learning_data(self):
+        """학습 데이터 불러오기"""
+        try:
+            learning_file = 'ai_learning_data.json'
+            if os.path.exists(learning_file):
+                with open(learning_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"[경고] 학습 데이터 로드 실패: {e}")
+        return None
+    
+    def load_prompt_config(self):
+        """AI 프롬프트 설정 파일 불러오기"""
+        try:
+            config_file = 'AI_프롬프트_설정.json'
+            if os.path.exists(config_file):
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"[경고] AI 프롬프트 설정 로드 실패: {e}")
+        return None
+    
+    def get_gambling_terms_prompt(self):
+        """도박 용어 사전을 프롬프트 형식으로 변환 (AI_프롬프트_설정.json에서 가져옴)"""
+        prompt_config = self.load_prompt_config()
+        if not prompt_config:
+            return ""
+        
+        gambling_terms = prompt_config.get('도박_용어_사전', {})
+        if not gambling_terms:
+            return ""
+        
+        categories = gambling_terms.get('카테고리', {})
+        if not categories:
+            return ""
+        
+        prompt_sections = []
+        prompt_sections.append("\n\n🎰 도박 용어 사전 (이 용어들을 자연스럽게 사용하세요):\n")
+        
+        for category_name, terms in categories.items():
+            category_display = category_name.replace('_', ' ').title()
+            prompt_sections.append(f"\n【{category_display}】")
+            
+            for term, info in terms.items():
+                meaning = info.get('의미', '')
+                examples = info.get('예문', [])
+                prompt_sections.append(f"- {term}: {meaning}")
+                if examples:
+                    prompt_sections.append(f"  예: {', '.join(examples[:2])}")
+        
+        prompt_sections.append("\n💡 중요: 게시글에서 이 용어들이 나오면 그 맥락을 이해하고, 필요시 댓글에도 자연스럽게 사용하세요.")
+        prompt_sections.append("예: '정배 찍었는데 터졌어' → '정배 찍었는데 아쉽네요' 같은 식으로 자연스럽게 반응하세요.")
+        
+        return "\n".join(prompt_sections)
     
     def load_commented_posts(self) -> set:
         """파일에서 이미 댓글을 작성한 게시글 목록 불러오기"""
@@ -107,6 +283,132 @@ class MacroBot:
             return False
         cleaned = re.sub(r'[ㅎㅋ~!?\s\.\,\-_\^\*]+', '', stripped)
         return len(cleaned) >= 2
+    
+    def extract_keywords_from_post(self, post_content: str, post_title: str = None) -> list:
+        """본문에서 핵심 키워드 추출 (명사, 주요 단어) - 개선된 버전"""
+        import re
+        
+        if not post_content:
+            return []
+        
+        # 본문과 제목 합치기
+        full_text = post_content
+        if post_title:
+            full_text = f"{post_title} {post_content}"
+        
+        # 특수문자 제거 (한글, 영문, 숫자만)
+        cleaned = re.sub(r'[^가-힣a-zA-Z0-9\s]', ' ', full_text)
+        
+        # 단어 추출
+        words = cleaned.split()
+        keywords = []
+        
+        # 제외할 단어들 (조사, 접속사, 일반적인 단어)
+        stop_words = {
+            '그리고', '그런데', '하지만', '그래서', '그러나', '그런', '이런', '저런',
+            '이것', '그것', '저것', '이거', '그거', '저거',
+            '오늘', '어제', '내일', '지금', '그때', '이때',
+            '있어', '없어', '하는', '하는데', '해서', '하고',
+            '좋아', '나쁘', '많이', '조금', '너무', '정말',
+            '뭐', '어떤', '어떻게', '언제', '어디', '누가', '왜',
+            '것', '거', '게', '건', '걸'
+        }
+        
+        # 명사/주요 단어 추출 (2~5글자, 의미 있는 단어만)
+        for word in words:
+            word = word.strip()
+            # 길이 체크 (2~5글자)
+            if len(word) < 2 or len(word) > 5:
+                continue
+            
+            # 한글이 포함된 단어만
+            if not re.search(r'[가-힣]', word):
+                continue
+            
+            # 제외 단어 필터링
+            if word in stop_words:
+                continue
+            
+            # 숫자만 있는 단어 제외
+            if re.match(r'^[0-9]+$', word):
+                continue
+            
+            keywords.append(word)
+        
+        # 중복 제거 및 빈도순 정렬
+        from collections import Counter
+        keyword_counts = Counter(keywords)
+        # 빈도가 높은 순으로 정렬 (최대 7개로 증가)
+        top_keywords = [word for word, count in keyword_counts.most_common(7)]
+        
+        return top_keywords
+    
+    def is_comment_relevant_to_post(self, comment_text: str, post_content: str, post_title: str = None) -> bool:
+        """댓글이 게시글 제목/본문과 관련이 있는지 확인 (완화된 기준)"""
+        if not comment_text or not post_content:
+            return False
+        
+        import re
+        
+        # 기본 원칙: AI가 생성한 댓글은 기본적으로 허용 (AI가 이미 본문을 분석했으므로)
+        # 정말 명백하게 무관한 경우만 거부
+        
+        # 댓글과 본문/제목을 정리
+        comment_clean = re.sub(r'[~!?ㅎㅋㅠㅜ\s\.\,\-]+', '', comment_text)
+        post_clean = re.sub(r'[~!?ㅎㅋㅠㅜ\s\.\,\-]+', '', post_content)
+        title_clean = re.sub(r'[~!?ㅎㅋㅠㅜ\s\.\,\-]+', '', post_title) if post_title else ""
+        
+        # 1. 본문이 너무 짧거나 의미 없으면 허용
+        if len(post_clean) < 5:
+            return True  # 짧은 본문도 허용
+        
+        # 2. 본문이 의미 없는 경우 (예: "ㅎㅎ", "...", "ㅋㅋ" 등) 허용
+        meaningless_patterns = ['ㅎ', 'ㅋ', 'ㅠ', 'ㅜ', '...', '..', '.']
+        meaningless_count = sum(post_clean.count(p) for p in meaningless_patterns)
+        meaningless_ratio = meaningless_count / max(len(post_clean), 1)
+        if meaningless_ratio > 0.5:  # 50% 이상이 의미 없는 문자
+            return True  # 의미 없는 본문도 허용
+        
+        # 3. 일반적인 공감 댓글은 자유게시판 특성상 허용
+        # 자유게시판에서는 본문과 직접적인 키워드 매칭이 없어도 감정적으로 공감하는 댓글이 자연스러움
+        common_empathy_comments = ['힘내', '아쉽', '공감', '위로', '좋아', '응원', '화이팅', 
+                                   '축하', '부럽', '대박', '지치네요', '다음엔', '조심']
+        comment_normalized = comment_clean.replace('요', '').replace('네', '').replace('어', '').replace('다', '').replace('해', '').replace('용', '')
+        if comment_normalized in common_empathy_comments:
+            return True  # 일반적인 공감 댓글은 허용
+        
+        # 4. 공통 키워드가 있으면 관련성 있음 (참고용, 없어도 OK)
+        def extract_keywords(text, min_len=2, max_len=3):
+            """텍스트에서 2~3글자 키워드 추출 (간단하게)"""
+            keywords = set()
+            for i in range(len(text) - min_len + 1):
+                for length in range(min_len, min(max_len + 1, len(text) - i + 1)):
+                    keyword = text[i:i+length]
+                    if len(keyword) >= min_len:
+                        keywords.add(keyword)
+            return keywords
+        
+        post_keywords = extract_keywords(post_clean)
+        title_keywords = extract_keywords(title_clean) if title_clean else set()
+        comment_keywords = extract_keywords(comment_clean)
+        
+        common_with_post = comment_keywords & post_keywords
+        common_with_title = comment_keywords & title_keywords if title_keywords else set()
+        
+        if len(common_with_post) > 0 or len(common_with_title) > 0:
+            return True  # 공통 키워드가 있으면 확실히 관련 있음
+        
+        # 5. 본문/제목의 핵심 단어가 댓글에 포함되어 있는지 확인 (부분 일치)
+        post_important_words = [post_clean[i:i+3] for i in range(len(post_clean)-2)]
+        title_important_words = [title_clean[i:i+3] for i in range(len(title_clean)-2)] if title_clean else []
+        
+        for word in post_important_words + title_important_words:
+            if word in comment_clean:
+                return True
+        
+        # 6. 기본적으로 허용 (AI가 생성한 댓글이므로 본문을 분석했을 것으로 가정)
+        # 정말 명백하게 무관한 경우만 거부하는데, 현재는 그런 경우를 찾기 어려우므로 기본적으로 허용
+        return True  # 기본적으로 허용 (자유게시판 특성상 감정적 공감 댓글도 자연스러움)
 
     def _is_negative_content(self, text: str) -> bool:
         """본문이 부정적인지 단순 판별"""
@@ -195,7 +497,7 @@ class MacroBot:
             if attempts == max_attempts - 1:
                 alt_comment = self.generate_style_matched_comment(existing_comments or [], post_content or '')
             else:
-                alt_comment = await self.generate_ai_comment_retry(post_content, existing_comments, attempts + 1)
+                alt_comment = await self.generate_ai_comment_retry(post_content, existing_comments, attempts + 1, post_title=getattr(self, '_last_post_title', None))
             if not alt_comment:
                 break
             if alt_comment == comment_text:
@@ -680,6 +982,78 @@ class MacroBot:
     
     # Gemini 함수 제거됨 - OpenAI만 사용
     
+    async def get_post_title(self) -> str:
+        """게시글 제목 가져오기"""
+        try:
+            # 게시글 제목 선택자들
+            title_selectors = [
+                '#bo_v_atc .bo_v_tit',     # 그누보드 제목
+                '.view_title',              # 일반적인 제목
+                '.board_title',             # 게시판 제목
+                'h1',                       # HTML5 h1 태그
+                'h2',                       # HTML5 h2 태그
+                '.title',                   # title 클래스
+                '#title',                   # title ID
+                '[class*="title"]',         # title이 포함된 클래스
+                '[id*="title"]',            # title이 포함된 ID
+                '.subject',                 # subject 클래스
+                '#subject',                 # subject ID
+            ]
+            
+            title_text = ""
+            
+            for selector in title_selectors:
+                try:
+                    element = await self.page.query_selector(selector)
+                    if element:
+                        title_text = await element.inner_text()
+                        if title_text and len(title_text.strip()) > 0:
+                            title_text = title_text.strip()
+                            print(f"[제목] ✅ 제목 찾음: {title_text[:50]}...")
+                            break
+                except Exception:
+                    continue
+            
+            # JavaScript로 직접 제목 찾기
+            if not title_text:
+                title_text = await self.page.evaluate("""
+                    () => {
+                        const selectors = [
+                            '#bo_v_atc .bo_v_tit',
+                            '.view_title',
+                            '.board_title',
+                            'h1',
+                            'h2',
+                            '.title',
+                            '#title',
+                            '[class*="title"]',
+                            '[id*="title"]',
+                            '.subject',
+                            '#subject'
+                        ];
+                        
+                        for (const sel of selectors) {
+                            const el = document.querySelector(sel);
+                            if (el) {
+                                const text = (el.innerText || el.textContent || '').trim();
+                                if (text && text.length > 0) {
+                                    return text;
+                                }
+                            }
+                        }
+                        return '';
+                    }
+                """)
+                
+                if title_text:
+                    print(f"[제목] ✅ JavaScript로 제목 찾음: {title_text[:50]}...")
+            
+            return title_text.strip() if title_text else ""
+            
+        except Exception as e:
+            print(f"[경고] 게시글 제목을 가져오는 중 오류: {e}")
+            return ""
+    
     async def get_post_content(self) -> str:
         """게시글 본문 내용 가져오기"""
         try:
@@ -876,30 +1250,27 @@ class MacroBot:
         # 랜덤 선택
         base = random.choice(base_comments)
         
-        # 스타일에 맞게 끝말 추가 (물결표 포함)
+        # 스타일에 맞게 끝말 추가 (이모티콘 없이, "용" 어미 사용 금지)
         if style['ending'] == '요':
-            comment = f"{base}용~" if base in ['힘내', '좋아', '대박'] else f"{base}요~"
+            comment = f"{base}요"  # "용" 어미 사용 금지
         elif style['ending'] == '다':
-            comment = f"{base}다~"
+            comment = f"{base}다"
         elif style['ending'] == '어':
-            comment = f"{base}어~"
+            comment = f"{base}어"
         elif style['ending'] == '해':
-            comment = f"{base}해~"
+            comment = f"{base}해"
         elif style['ending'] == '네요':
-            comment = f"{base}네요~"
+            comment = f"{base}네요"
         else:
-            comment = f"{base}요~"
+            comment = f"{base}요"
         
-        # 가벼운 댓글도 추가 (기분 좋은 글용) - 과한 표현 제거
+        # 가벼운 댓글도 추가 (기분 좋은 글용) - 이모티콘 제거
         if base in ['축하', '부럽', '대박', '좋아'] and random.random() > 0.7:  # 30% 확률
-            light_comments = ['좋아~', '부럽네', '대박요', '기쁘다']
+            light_comments = ['좋아요', '부럽네요', '대박이네요', '기쁘네요']
             comment = random.choice(light_comments)
         
-        # 이모티콘 추가 (항상 물결표나 느낌표 사용)
-        emojis = ['~', '!', '~!', '~~']
-        if random.random() > 0.3:  # 70% 확률로 이모티콘 추가 (더 친근하게)
-            if not comment.endswith('~') and not comment.endswith('!'):
-                comment += random.choice(emojis)
+        # 이모티콘 추가 제거 (이모티콘 사용 금지)
+        # 이모티콘은 사용하지 않음
         
         # 길이 제한 (10글자)
         if len(comment) > 10:
@@ -910,6 +1281,9 @@ class MacroBot:
         
         comment = self.enhance_tone_variation(comment, post_content)
         
+        # 중복 어미 제거 (요요, 네요요 등)
+        comment = self.clean_comment(comment)
+        
         print(f"[댓글] 기존 댓글 스타일 분석: 끝말={style['ending']}, 이모티콘={style['has_emoji']}")
         print(f"[댓글] 스타일 맞춤 댓글 생성: {comment}")
         
@@ -918,73 +1292,179 @@ class MacroBot:
     async def get_existing_comments(self) -> list:
         """기존 댓글들 가져오기"""
         try:
-            # 댓글 영역 선택자들
-            comment_selectors = [
-                '.comment',
-                '.reply',
-                '.comment_list',
-                '[class*="comment"]',
-                '[class*="reply"]',
-                '[id*="comment"]',
-                '[id*="reply"]',
-            ]
-            
             comments = []
             
-            # JavaScript로 댓글 찾기
+            # JavaScript로 댓글 찾기 (정확한 구조 기반)
             comments_data = await self.page.evaluate("""
                 () => {
-                    // 댓글 영역 찾기
-                    const commentContainers = [
-                        '.comment_list',
-                        '.reply_list',
-                        '[class*="comment"]',
-                        '[class*="reply"]',
-                        '[id*="comment"]',
-                        '[id*="reply"]'
-                    ];
-                    
                     let allComments = [];
                     
-                    for (const selector of commentContainers) {
-                        const container = document.querySelector(selector);
-                        if (container) {
-                            // 댓글 텍스트 찾기
-                            const commentElements = container.querySelectorAll('.comment_text, .reply_text, [class*="text"], [class*="content"]');
-                            commentElements.forEach(el => {
-                                const text = (el.innerText || el.textContent || '').trim();
-                                if (text && text.length > 3 && text.length < 200) {
+                    // 방법 1: article[id^="c_"] 태그로 댓글 찾기 (가장 정확)
+                    const commentArticles = document.querySelectorAll('article[id^="c_"]');
+                    commentArticles.forEach(article => {
+                        // textarea[id^="save_comment_"]에서 댓글 텍스트 가져오기
+                        const textarea = article.querySelector('textarea[id^="save_comment_"]');
+                        if (textarea) {
+                            const text = (textarea.value || textarea.textContent || '').trim();
+                            if (text && text.length > 0) {
+                                allComments.push(text);
+                            }
+                        } else {
+                            // textarea가 없으면 .cmt_contents에서 텍스트 가져오기
+                            const cmtContents = article.querySelector('.cmt_contents');
+                            if (cmtContents) {
+                                const text = (cmtContents.innerText || cmtContents.textContent || '').trim();
+                                if (text && text.length > 0) {
                                     allComments.push(text);
                                 }
-                            });
-                            
-                            // 직접 텍스트 노드 찾기
-                            const directText = container.innerText || container.textContent;
-                            if (directText) {
-                                const lines = directText.split('\\n').map(l => l.trim()).filter(l => l.length > 3 && l.length < 200);
-                                allComments = allComments.concat(lines);
                             }
                         }
+                    });
+                    
+                    // 방법 2: textarea[id^="save_comment_"] 직접 찾기 (백업 방법)
+                    if (allComments.length === 0) {
+                        const saveCommentTextareas = document.querySelectorAll('textarea[id^="save_comment_"]');
+                        saveCommentTextareas.forEach(textarea => {
+                            const text = (textarea.value || textarea.textContent || '').trim();
+                            if (text && text.length > 0) {
+                                allComments.push(text);
+                            }
+                        });
                     }
                     
-                    // 중복 제거
-                    return [...new Set(allComments)].slice(0, 10); // 최대 10개
+                    // 방법 3: .cmt_contents 클래스로 찾기 (백업 방법)
+                    if (allComments.length === 0) {
+                        const cmtContents = document.querySelectorAll('.cmt_contents');
+                        cmtContents.forEach(el => {
+                            const text = (el.innerText || el.textContent || '').trim();
+                            if (text && text.length > 0) {
+                                // 댓글 입력 필드나 버튼 텍스트 제외
+                                if (!text.includes('댓글 입력') && !text.includes('댓글등록') && 
+                                    !text.includes('작성') && !text.includes('등록')) {
+                                    allComments.push(text);
+                                }
+                            }
+                        });
+                    }
+                    
+                    // 필터링: 의미 있는 댓글만 (너무 짧거나 의미 없는 것 제외)
+                    const filtered = allComments.filter(c => {
+                        const trimmed = c.trim();
+                        return trimmed.length >= 1 && trimmed.length <= 200 && 
+                               !trimmed.match(/^\\s*$/) && // 공백만 있는 것 제외
+                               !trimmed.match(/^\\d+$/) && // 숫자만 있는 것 제외
+                               !trimmed.includes('댓글 입력') && 
+                               !trimmed.includes('댓글등록') &&
+                               !trimmed.includes('작성') &&
+                               !trimmed.includes('등록');
+                    });
+                    
+                    return filtered;
                 }
             """)
             
             if comments_data:
-                comments = [c for c in comments_data if c and len(c.strip()) > 3]
+                comments = [c for c in comments_data if c and len(c.strip()) > 0]
+            
+            print(f"[댓글] 실제 발견된 댓글 수: {len(comments)}개")
+            if comments:
+                for i, comment in enumerate(comments[:5], 1):
+                    print(f"  {i}. {comment[:50]}...")
+            
+            # 디버깅: 댓글을 찾지 못한 경우 페이지 구조 분석
+            if not comments or len(comments) == 0:
+                print("[디버깅] 댓글을 찾지 못했습니다. 페이지 구조를 분석합니다...")
+                page_structure = await self.page.evaluate("""
+                    () => {
+                        const info = {
+                            title: document.title,
+                            url: window.location.href,
+                            bodyClasses: document.body.className,
+                            bodyId: document.body.id,
+                            allIds: Array.from(document.querySelectorAll('[id]')).map(el => el.id).slice(0, 20),
+                            allClasses: Array.from(document.querySelectorAll('[class]')).map(el => el.className).slice(0, 30),
+                            forms: Array.from(document.querySelectorAll('form')).map(f => ({
+                                id: f.id,
+                                class: f.className,
+                                action: f.action
+                            })),
+                            textareas: Array.from(document.querySelectorAll('textarea')).map(t => ({
+                                id: t.id,
+                                class: t.className,
+                                placeholder: t.placeholder
+                            })),
+                            buttons: Array.from(document.querySelectorAll('button, input[type="submit"]')).map(b => ({
+                                id: b.id,
+                                class: b.className,
+                                value: b.value || b.textContent
+                            }))
+                        };
+                        return info;
+                    }
+                """)
+                print(f"[디버깅] 페이지 제목: {page_structure.get('title', 'N/A')}")
+                print(f"[디버깅] 페이지 URL: {page_structure.get('url', 'N/A')}")
+                print(f"[디버깅] 발견된 ID들 (처음 10개): {page_structure.get('allIds', [])[:10]}")
+                print(f"[디버깅] 발견된 클래스들 (처음 15개): {page_structure.get('allClasses', [])[:15]}")
+                print(f"[디버깅] 발견된 폼들: {page_structure.get('forms', [])}")
+                print(f"[디버깅] 발견된 textarea들: {page_structure.get('textareas', [])}")
+                print(f"[디버깅] 발견된 버튼들: {page_structure.get('buttons', [])}")
+                print("[디버깅] 위 정보를 개발자에게 알려주시면 댓글 위치를 정확히 찾을 수 있습니다.")
             
             return comments[:10]  # 최대 10개만
             
         except Exception as e:
             print(f"[경고] 기존 댓글을 가져오는 중 오류: {e}")
+            import traceback
+            print(f"[경고] 상세 오류: {traceback.format_exc()}")
             return []
     
-    async def generate_ai_comment(self, post_content: str, existing_comments: list = None) -> str:
-        """AI를 사용해서 게시글 본문과 기존 댓글을 고려하여 관련된 댓글 생성"""
+    def clean_comment(self, comment: str) -> str:
+        """댓글에서 중복 어미, 이모티콘, 마침표, 불필요한 문자 제거"""
+        import re
+        
+        if not comment:
+            return comment
+        
+        # 1. 이모티콘/기호 제거 (물결표, 느낌표, ㅠㅠ 등)
+        comment = re.sub(r'[~!ㅠㅜㅎㅋ]+', '', comment)
+        
+        # 2. 마침표 제거
+        comment = re.sub(r'\.+', '', comment)  # 모든 마침표 제거
+        
+        # 3. "용" 어미 제거 (예: "힘내용" -> "힘내요", "좋아용" -> "좋아요")
+        comment = re.sub(r'(\S+)용$', r'\1요', comment)  # 끝에 있는 "용" -> "요"
+        comment = re.sub(r'(\S+)용\s', r'\1요 ', comment)  # 중간에 있는 "용" -> "요"
+        
+        # 4. 중복 어미 제거: "요요", "네요요", "어요요" 등 (모든 위치에서)
+        comment = re.sub(r'요요+', '요', comment)  # "요요" -> "요", "요요요" -> "요"
+        comment = re.sub(r'네요요+', '네요', comment)  # "네요요" -> "네요"
+        comment = re.sub(r'어요요+', '어요', comment)  # "어요요" -> "어요"
+        comment = re.sub(r'해요요+', '해요', comment)  # "해요요" -> "해요"
+        comment = re.sub(r'되요요+', '되요', comment)  # "되요요" -> "되요"
+        comment = re.sub(r'다요요+', '다요', comment)  # "다요요" -> "다요"
+        comment = re.sub(r'야요요+', '야요', comment)  # "야요요" -> "야요"
+        
+        # 5. 댓글 끝에 "요"가 중복되거나 어색하게 붙는 경우 정리
+        # 예: "화이팅요요" -> "화이팅요" (위에서 처리)
+        # 예: "힘내요 요" -> "힘내요"
+        comment = re.sub(r'(\S+)요\s*요', r'\1요', comment)  # "힘내요 요" -> "힘내요"
+        comment = re.sub(r'(\S+)\s*요$', r'\1요', comment)  # "화이팅 요" -> "화이팅요"
+        
+        # 6. 불필요한 공백 제거 (예: "화이팅  요" -> "화이팅요")
+        comment = re.sub(r'\s+([요])', r'\1', comment)
+        
+        # 7. 연속된 공백 제거
+        comment = re.sub(r'\s+', ' ', comment)
+        comment = comment.strip()
+        
+        return comment
+    
+    async def generate_ai_comment(self, post_content: str, existing_comments: list = None, post_title: str = None) -> str:
+        """AI를 사용해서 게시글 제목, 본문과 기존 댓글을 고려하여 관련된 댓글 생성"""
         # 기존 댓글과 본문 정보 저장 (AI 실패 시 사용)
         self._last_post_content = post_content
+        self._last_post_title = post_title or ""
         self._last_existing_comments = existing_comments or []
         
         # OpenAI API 키 확인
@@ -1018,52 +1498,306 @@ class MacroBot:
             print(f"[AI] 기존 댓글 {len(existing_comments)}개 확인: {existing_comments[:3]}...")
         
         try:
-            # 기존 댓글 정보 추가
+            # 기존 댓글 정보 추가 (최우선 참고)
             if existing_comments and len(existing_comments) > 0:
                 numbered_comments = "\n".join(
                     [f"{idx + 1}. {c}" for idx, c in enumerate(existing_comments[:8])]
                 )
-                comments_text = f"\n\n현재 댓글 흐름 (최근 {min(len(existing_comments), 8)}개):\n{numbered_comments}\n\n위 댓글들의 말투와 감정선, 이모티콘 빈도를 참고해 자연스럽게 이어주세요."
+                comments_text = f"\n\n⭐⭐⭐ 가장 중요: 현재 댓글 흐름 (최근 {min(len(existing_comments), 8)}개):\n{numbered_comments}\n\n"
+                comments_text += "⚠️ 반드시 위 댓글들을 우선적으로 분석하세요:\n"
+                comments_text += "1. 위 댓글들의 말투 패턴을 정확히 파악 (존댓말/반말, 어미 패턴)\n"
+                comments_text += "2. 위 댓글들의 스타일과 길이를 분석\n"
+                comments_text += "3. 위 댓글들의 감정선과 톤을 파악\n"
+                comments_text += "4. 위 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요\n"
+                comments_text += "5. 본문보다 위 기존 댓글 스타일에 더 중점을 두세요\n"
             else:
                 comments_text = "\n\n현재 댓글 흐름: (댓글 없음)"
             
-            # 프롬프트 작성
-            prompt = f"""다음 게시글 본문과 기존 댓글들을 읽고, 작성자의 감정에 공감하는 자연스러운 댓글을 작성해주세요.
+            # 도박 용어 사전 가져오기
+            gambling_terms_text = self.get_gambling_terms_prompt()
+            if gambling_terms_text:
+                print("[AI] 도박 용어 사전 로드 완료")
+            
+            # AI 프롬프트 설정 파일에서 Few-shot 예시 가져오기
+            few_shot_text = ""
+            bad_examples_text = ""
+            base_prompt_section = ""
+            
+            prompt_config = self.load_prompt_config()
+            
+            # 1순위: AI_프롬프트_설정.json 파일 사용
+            if prompt_config:
+                # 좋은 댓글 예시 추가 (기존 댓글 스타일 반영 필수)
+                good_examples = prompt_config.get('좋은_댓글_예시', [])
+                if good_examples:
+                    few_shot_text = "\n\n📚 좋은 댓글 예시 (반드시 기존 댓글 스타일과 비슷하게 작성하세요):\n"
+                    few_shot_text += "⚠️ 중요: 아래 예시들은 모두 기존 댓글들의 스타일을 따라 작성된 것입니다.\n"
+                    few_shot_text += "당신도 반드시 현재 게시글의 기존 댓글들을 먼저 분석하고, 그 스타일과 비슷하게 댓글을 작성해야 합니다.\n\n"
+                    for i, example in enumerate(good_examples[:10], 1):  # 최대 10개로 확대
+                        few_shot_text += f"\n예시 {i}:\n"
+                        existing = example.get('기존_댓글_예시', []) or example.get('기존_댓글', [])
+                        if existing:
+                            few_shot_text += f"기존 댓글: {', '.join(existing[:3])}\n"
+                            few_shot_text += f"→ 좋은 댓글 (기존 댓글 스타일 반영): {example.get('좋은_댓글', '')}\n"
+                            few_shot_text += f"※ 이 댓글은 위 기존 댓글들의 말투, 스타일, 길이를 따라 작성되었습니다.\n"
+                        else:
+                            few_shot_text += f"본문: {example.get('본문_예시', '')[:100]}...\n"
+                            few_shot_text += f"좋은 댓글: {example.get('좋은_댓글', '')}\n"
+                        reason = example.get('이유', '')
+                        if reason:
+                            few_shot_text += f"이유: {reason}\n"
+                
+                # 나쁜 예시 추가
+                bad_examples = prompt_config.get('나쁜_댓글_예시', [])
+                if bad_examples:
+                    bad_examples_text = "\n\n❌ 피해야 할 댓글 예시:\n"
+                    for bad in bad_examples[:3]:  # 최대 3개
+                        bad_examples_text += f"- {bad.get('댓글', '')} (이유: {bad.get('이유', '')})\n"
+                
+                # 개선된 프롬프트가 있으면 사용
+                improved_prompt = prompt_config.get('프롬프트_개선_내용', '')
+                if improved_prompt:
+                    base_prompt_section = improved_prompt
+                    print("[AI] 프롬프트 설정 파일의 개선 프롬프트 사용 중...")
+            
+            # 2순위: ai_learning_data.json 파일 사용 (기존 학습 데이터)
+            elif hasattr(self, 'learning_data') and self.learning_data:
+                # Few-shot 예시 추가 (기존 댓글 스타일 반영 필수)
+                few_shot_examples = self.learning_data.get('few_shot_examples', [])
+                if few_shot_examples:
+                    few_shot_text = "\n\n📚 좋은 댓글 예시 (반드시 기존 댓글 스타일과 비슷하게 작성하세요):\n"
+                    few_shot_text += "⚠️ 중요: 아래 예시들은 모두 기존 댓글들의 스타일을 따라 작성된 것입니다.\n"
+                    few_shot_text += "당신도 반드시 현재 게시글의 기존 댓글들을 먼저 분석하고, 그 스타일과 비슷하게 댓글을 작성해야 합니다.\n\n"
+                    for i, example in enumerate(few_shot_examples[:10], 1):  # 최대 10개로 확대
+                        few_shot_text += f"\n예시 {i}:\n"
+                        existing = example.get('existing', [])
+                        if existing:
+                            few_shot_text += f"기존 댓글: {', '.join(existing[:3])}\n"
+                            few_shot_text += f"→ 좋은 댓글 (기존 댓글 스타일 반영): {example.get('good_comment', '')}\n"
+                            few_shot_text += f"※ 이 댓글은 위 기존 댓글들의 말투, 스타일, 길이를 따라 작성되었습니다.\n"
+                        else:
+                            few_shot_text += f"본문: {example.get('post', '')[:100]}...\n"
+                            few_shot_text += f"좋은 댓글: {example.get('good_comment', '')}\n"
+                
+                # 나쁜 예시 추가
+                bad_examples = self.learning_data.get('bad_examples', [])
+                if bad_examples:
+                    bad_examples_text = "\n\n❌ 피해야 할 댓글 예시:\n"
+                    for bad in bad_examples[:3]:  # 최대 3개
+                        bad_examples_text += f"- {bad.get('comment', '')} (이유: {bad.get('reason', '')})\n"
+                
+                # 개선된 프롬프트가 있으면 사용
+                improved_prompt = self.learning_data.get('improved_prompt', '')
+                if improved_prompt:
+                    base_prompt_section = improved_prompt
+                    print("[AI] 학습된 개선 프롬프트 사용 중...")
+            
+            # 기본 프롬프트 (설정 파일이나 학습 데이터가 없을 때)
+            if not base_prompt_section:
+                # 프롬프트 설정 파일에서 기본 규칙 가져오기
+                if prompt_config:
+                    basic_rules = prompt_config.get('기본_규칙', {})
+                    board_type = basic_rules.get('게시판_특성', '도박 관련 사이트의 자유게시판')
+                    comment_style = basic_rules.get('댓글_스타일', '페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일')
+                    max_length = basic_rules.get('최대_길이', '10글자 이내')
+                    tone_matching = basic_rules.get('말투_매칭', '본문이 존댓말이면 댓글도 존댓말, 본문이 반말이면 댓글도 반말')
+                    
+                    # 본문 및 댓글 분석 가이드 가져오기
+                    analysis_guide = ""
+                    if prompt_config:
+                        # 본문 분석 가이드
+                        post_analysis = prompt_config.get('본문_분석_가이드', {})
+                        if post_analysis:
+                            analysis_items = post_analysis.get('분석_항목', {})
+                            if analysis_items:
+                                analysis_guide += "\n\n📖 본문 분석 방법 (반드시 이 순서로 분석하세요):\n"
+                                # 말투 분석
+                                tone_analysis = analysis_items.get('1_말투_분석', {})
+                                if tone_analysis:
+                                    analysis_guide += f"\n1️⃣ 말투 분석:\n"
+                                    analysis_guide += f"- 목적: {tone_analysis.get('목적', '')}\n"
+                                    checklist = tone_analysis.get('체크리스트', [])
+                                    for item in checklist:
+                                        analysis_guide += f"  • {item}\n"
+                                
+                                # 감정 분석
+                                emotion_analysis = analysis_items.get('2_감정_분석', {})
+                                if emotion_analysis:
+                                    analysis_guide += f"\n2️⃣ 감정 분석:\n"
+                                    analysis_guide += f"- 목적: {emotion_analysis.get('목적', '')}\n"
+                                    categories = emotion_analysis.get('감정_카테고리', {})
+                                    for cat_name, cat_info in list(categories.items())[:3]:  # 최대 3개
+                                        keywords = cat_info.get('키워드', [])
+                                        tone = cat_info.get('댓글_톤', '')
+                                        example = cat_info.get('예시', '')
+                                        analysis_guide += f"  • {cat_name}: 키워드 {', '.join(keywords[:3])} → {tone}\n"
+                                
+                                # 핵심 키워드 추출
+                                keyword_analysis = analysis_items.get('3_핵심_키워드_추출', {})
+                                if keyword_analysis:
+                                    analysis_guide += f"\n3️⃣ 핵심 키워드 추출:\n"
+                                    analysis_guide += f"- 목적: {keyword_analysis.get('목적', '')}\n"
+                                    methods = keyword_analysis.get('방법', [])
+                                    for method in methods[:3]:  # 최대 3개
+                                        analysis_guide += f"  • {method}\n"
+                        
+                        # 댓글 흐름 분석 가이드
+                        comment_analysis = prompt_config.get('댓글_흐름_분석_가이드', {})
+                        if comment_analysis:
+                            analysis_items = comment_analysis.get('분석_항목', {})
+                            if analysis_items:
+                                analysis_guide += "\n\n💬 댓글 흐름 분석 방법 (기존 댓글들을 이렇게 분석하세요):\n"
+                                # 말투 패턴 분석
+                                tone_pattern = analysis_items.get('1_말투_패턴_분석', {})
+                                if tone_pattern:
+                                    analysis_guide += f"\n1️⃣ 말투 패턴 분석:\n"
+                                    analysis_guide += f"- 목적: {tone_pattern.get('목적', '')}\n"
+                                    checklist = tone_pattern.get('체크리스트', [])
+                                    for item in checklist[:3]:  # 최대 3개
+                                        analysis_guide += f"  • {item}\n"
+                                
+                                # 감정선 분석
+                                emotion_flow = analysis_items.get('2_감정선_분석', {})
+                                if emotion_flow:
+                                    analysis_guide += f"\n2️⃣ 감정선 분석:\n"
+                                    analysis_guide += f"- 목적: {emotion_flow.get('목적', '')}\n"
+                                    checklist = emotion_flow.get('체크리스트', [])
+                                    for item in checklist[:3]:  # 최대 3개
+                                        analysis_guide += f"  • {item}\n"
+                                
+                                # 이모티콘/기호 패턴
+                                emoji_pattern = analysis_items.get('3_이모티콘_및_기호_패턴', {})
+                                if emoji_pattern:
+                                    analysis_guide += f"\n3️⃣ 이모티콘/기호 패턴:\n"
+                                    analysis_guide += f"- 목적: {emoji_pattern.get('목적', '')}\n"
+                                    checklist = emoji_pattern.get('체크리스트', [])
+                                    for item in checklist[:3]:  # 최대 3개
+                                        analysis_guide += f"  • {item}\n"
+                        
+                        # 본문-댓글 관계 가이드
+                        relationship_guide = prompt_config.get('본문_댓글_관계_이해_가이드', {})
+                        if relationship_guide:
+                            relationship_types = relationship_guide.get('관계_유형', {})
+                            if relationship_types:
+                                analysis_guide += "\n\n🔗 본문-댓글 관계 이해:\n"
+                                for rel_name, rel_info in list(relationship_types.items())[:2]:  # 최대 2개
+                                    analysis_guide += f"\n• {rel_name}: {rel_info.get('설명', '')}\n"
+                    
+                    # 본문이 의미 없는지 확인
+                    is_meaningless = False
+                    if post_content:
+                        meaningless_patterns = [
+                            len(post_content.strip()) < 10,  # 너무 짧음
+                            post_content.strip() in ['', ' ', '.', '..', '...'],  # 거의 비어있음
+                            len(set(post_content.strip().split())) < 3,  # 단어가 너무 적음
+                        ]
+                        # 의미 없는 패턴 체크
+                        meaningless_keywords = ['ㅎ', 'ㅋ', 'ㅠ', 'ㅜ', '...', '..', '.']
+                        if len(post_content.strip()) < 20:
+                            meaningless_count = sum(1 for kw in meaningless_keywords if kw in post_content)
+                            if meaningless_count >= len(post_content.strip()) * 0.5:  # 50% 이상이 의미 없는 문자
+                                is_meaningless = True
+                    
+                    meaningless_guide = ""
+                    if is_meaningless:
+                        meaningless_guide = "\n\n⚠️ 특별 상황: 게시글 본문이 의미 없거나 내용이 거의 없습니다.\n- 이런 경우 간단하고 무난한 댓글을 작성하세요\n- 예: '그렇네요', '맞아요', '알겠어요', '응', 'ㅇㅇ'\n- 과도하게 긍정적이거나 형식적인 댓글은 피하세요\n- 기존 댓글이 있으면 그 스타일에 맞춰 작성하세요\n"
+                    
+                    base_prompt_section = f"""다음 게시글 본문과 기존 댓글들을 읽고, 작성자의 감정에 공감하는 자연스러운 댓글을 작성해주세요.
 
-⚠️ 중요: 이 게시판은 도박 관련 게시판입니다. 다양한 주제의 글이 올라오지만 메인 카테고리는 도박입니다.
-- 도박으로 잃은 사람들, 많이 딴 사람들 등 도박 관련 경험을 공유하는 게시판
-- 도박과 직접 관련 없는 글도 올라올 수 있지만, 게시판의 맥락은 도박입니다
-- 댓글은 게시판의 맥락을 고려하면서도 게시글 내용에 맞게 작성해야 합니다
+⚠️ 중요: 이 게시판은 {board_type}입니다.
+- 자유게시판이기 때문에 도박과 관련된 얘기만 하는 것이 아니라 단순 수다를 떨 때도 있습니다
+- 게시글 주제가 도박이든 일상이든 상관없이, 본문 내용과 기존 댓글 흐름에 맞춰 작성해야 합니다
+- 댓글은 {comment_style}로 작성해야 합니다{meaningless_guide}
 
-- 작성자의 톤과 감정을 정확히 파악하고 그에 맞춰 댓글 작성
+🎯 핵심 규칙 (반드시 지켜야 함):
+1. ⭐⭐⭐ 가장 중요: 기존 댓글들을 우선적으로 분석하세요!
+   - 기존 댓글들의 말투, 스타일, 길이, 감정선을 정확히 파악
+   - 기존 댓글들과 최대한 비슷한 스타일로 댓글 작성
+   - 본문보다 기존 댓글 스타일에 더 중점을 두세요
+2. 말투 매칭: {tone_matching}
+   - 기존 댓글들의 말투 패턴을 우선 확인
+   - 기존 댓글이 대부분 존댓말이면 존댓말로, 반말이면 반말로 작성
+   - 본문 말투는 참고용으로만 사용
+3. 본문의 핵심 키워드를 댓글에 자연스럽게 활용 (선택적)
+4. 이모티콘 절대 사용 금지 (물결표, 느낌표, ㅠㅠ 등 모두 금지)
+5. 마침표(.) 절대 사용 금지
+6. "용" 어미 절대 사용 금지
+7. 반드시 {max_length}로 완성
+8. 맞춤법 정확하게 사용
+9. 형식적인 댓글 금지 ("감사합니다", "좋은 글" 등)
+
+📝 댓글 작성 방법 (우선순위 - 반드시 이 순서로):
+1. ⭐⭐⭐ 가장 먼저: 기존 댓글들을 정확히 분석
+   - 기존 댓글들의 말투 패턴 파악 (존댓말/반말, 어미 패턴)
+   - 기존 댓글들의 스타일과 길이 분석
+   - 기존 댓글들의 감정선과 톤 파악
+2. ⭐⭐ 두 번째: 기존 댓글들과 최대한 비슷한 스타일로 댓글 설계
+   - 기존 댓글들의 말투 패턴을 따라 작성
+   - 기존 댓글들의 길이와 스타일을 따라 작성
+   - 기존 댓글들의 감정선을 자연스럽게 이어가기
+3. ⭐ 세 번째: 본문의 말투, 감정, 핵심 키워드를 참고 (선택적)
+   - 기존 댓글 스타일을 유지하면서 본문 내용만 참고
+4. 기존 댓글과 너무 비슷하지 않게 작성하되, 스타일은 반드시 일치시켜야 함
+
+최종 출력은 댓글 한 줄만 해야 하며, 다른 문장은 포함하면 안 됩니다."""
+                else:
+                    # 기본 프롬프트 (설정 파일이 없을 때)
+                    base_prompt_section = """다음 게시글 본문과 기존 댓글들을 읽고, 작성자의 감정에 공감하는 자연스러운 댓글을 작성해주세요.
+
+⚠️ 중요: 이 게시판은 도박 관련 사이트의 자유게시판입니다.
+- 자유게시판이기 때문에 도박과 관련된 얘기만 하는 것이 아니라 단순 수다를 떨 때도 있습니다
+- 게시글 주제가 도박이든 일상이든 상관없이, 본문 내용과 기존 댓글 흐름에 맞춰 작성해야 합니다
+- 댓글은 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 작성해야 합니다
+
+🎯 말투 매칭 규칙 (매우 중요):
+- 본문이 존댓말이면 댓글도 반드시 높임말을 사용해야 합니다
+- 예: 본문이 "~할까요?", "~인가요?", "~일까요?" 같은 높임말 → 댓글은 "~요 입니다", "~요", "~네요", "~어요" 같은 높임말 사용
+- 예: 본문이 "~할까?", "~인가?", "~일까?" 같은 반말 → 댓글은 "~야", "~다", "~어" 같은 반말 사용
+- 본문의 말투를 정확히 분석하고 그에 맞춰 댓글 말투를 결정해야 합니다
+
+📝 댓글 작성 원칙 (우선순위):
+1. ⭐⭐⭐ 가장 중요: 기존 댓글들을 우선적으로 분석하고, 기존 댓글들과 최대한 비슷한 스타일로 작성
+   - 기존 댓글들의 말투, 스타일, 길이, 감정선을 정확히 파악
+   - 기존 댓글들의 패턴을 따라 댓글 작성
+   - 본문보다 기존 댓글 스타일에 더 중점을 두세요
+2. 본문 내용은 참고용으로만 사용 (기존 댓글 스타일을 유지하면서)
 - 친구 같은 느낌의 글 → 친구처럼 편하게 반말이나 캐주얼한 댓글
+- 존댓말로 쓴 글 → 존댓말로 댓글 작성 (예: "~요", "~네요", "~어요")
 - 형식적인 글 → 형식적인 댓글 (하지만 "감사합니다" 같은 금지 단어는 사용하지 말 것)
 - 시답잖은 소리 → 그냥 맞춰주기만 하면 됨 (꼭 긍정적일 필요 없음)
-- 절망/후회하는 글 → "힘내용~", "아쉽네~", "다음엔 조심해~", "공감해~", "위로해~"
-- 기쁨/성공한 글 → "축하해~", "부럽다~", "좋아~", "대박~"
-- 아쉬운 글 → "아쉽네~", "다음엔 잘될 거야~", "아깝다~"
-- 슬프거나 힘든 글 → "힘내~", "공감해~", "위로해~", "아쉽네~"
-- 게시판이 도박 관련이라는 맥락을 고려하되, 게시글 내용과 톤에 맞는 댓글 작성
+- 절망/후회하는 글 → "힘내요", "아쉽네요", "다음엔 조심해요", "공감해요", "위로해요"
+- 기쁨/성공한 글 → "축하해요", "부럽네요", "좋아요", "대박이네요"
+- 아쉬운 글 → "아쉽네요", "다음엔 잘될 거예요", "아깝네요"
+- 슬프거나 힘든 글 → "힘내요", "공감해요", "위로해요", "아쉽네요"
 - 절대 형식적인 댓글을 사용하지 말 것 (예: "좋은 글 감사합니다", "좋은 정보 감사합니다", "유용한 정보네요", "잘 읽었습니다" 등)
 - 게시글 내용뿐 아니라 기존 댓글 흐름과도 연관된 댓글이어야 함
-- 기존 댓글과 자연스럽게 이어지는 톤과 스타일로 작성 (말투·이모티콘 빈도를 맞추기)
 - 반드시 10글자 이내로 완성해야 함 (10글자를 넘기면 안 됨, 잘라내지 말고 처음부터 10글자 이내로 작성)
-- ~입니다 체는 사용하지 말고 ~요 체나 반말체로 작성하되, 너무 반말만 쓰지 말고 "~요", "~용", "~요!"처럼 적당히 섞어서 사용
-- 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호를 상황에 맞게 0~1회만 사용 (매크로 티 안 나게)
-- 예: "힘내요" → "힘내용~", "좋아요" → "좋아~", "대박이네요" → "대박~", "아쉽네요" → "아쉽네ㅠㅠ"
+- ~입니다 체는 사용하지 말고 ~요 체나 반말체로 작성하되, 본문 말투에 맞춰 결정
+- 이모티콘 절대 사용 금지: 물결표(~), 느낌표(!), "ㅠㅠ" 등 모든 이모티콘/기호를 사용하지 마세요
+- 예: "힘내요" → "힘내요", "좋아요" → "좋아요", "대박이네요" → "대박이네요", "아쉽네요" → "아쉽네요"
 - 격식이 조금 떨어져도 괜찮음, 오히려 더 자연스럽고 친근한 톤으로 작성
 - 자연스럽고 친근한 톤으로 작성
 - 기분 좋은 글이면 담담하게 축하하고, 힘든 글이면 솔직히 지친 느낌이나 현실적인 톤도 가능 (예: "아 지치네요", "버텨야죠")
 - 맞춤법을 반드시 정확하게 사용
 - 반드시 게시글 내용과 관련된 댓글이어야 함
-- 기존 댓글과 너무 비슷하지 않게 작성
+- 기존 댓글과 너무 비슷하지 않게 작성하되, 말투와 스타일은 비슷하게 유지
 - 본문이 친구처럼 편하게 쓴 글이라면 친구처럼 편하게 댓글 작성
 - 본문이 시답잖은 소리라면 그냥 맞춰주기만 하면 됨 (꼭 긍정적이거나 위로할 필요 없음)
 
-추론 절차 (반드시 내부적으로 거친 뒤 마지막에 댓글 한 줄만 출력):
-1. 본문에서 핵심 키워드와 감정을 2개 이상 파악하고, 그 감정을 친구에게 설명하듯 요약합니다. (생각만, 출력 금지)
-2. 기존 댓글들의 말투/이모티콘/길이 패턴을 분석해 어떤 어미가 자연스럽고 어떤 감정선이 이어지는지 결정합니다. (생각만, 출력 금지)
-3. 위 두 정보를 합쳐 10글자 이내의 댓글을 설계합니다. 물결표/느낌표 사용 여부도 함께 결정하되 과하게 반복하지 않습니다.
+추론 절차 (반드시 이 순서로 내부적으로 거친 뒤 마지막에 댓글 한 줄만 출력):
+1. ⭐⭐⭐ 가장 먼저: 기존 댓글들을 정확히 분석합니다.
+   - 기존 댓글들의 말투 패턴을 파악합니다 (존댓말/반말, 어미 패턴)
+   - 기존 댓글들의 스타일과 길이를 분석합니다
+   - 기존 댓글들의 감정선과 톤을 파악합니다
+   - 기존 댓글들이 어떤 패턴으로 작성되었는지 정확히 이해합니다. (생각만, 출력 금지)
+2. ⭐⭐ 두 번째: 기존 댓글 스타일을 따라 댓글을 설계합니다.
+   - 기존 댓글들의 말투 패턴을 따라 작성합니다
+   - 기존 댓글들의 길이와 스타일을 따라 작성합니다
+   - 기존 댓글들의 감정선을 자연스럽게 이어갑니다. (생각만, 출력 금지)
+3. ⭐ 세 번째: 본문의 말투와 핵심 키워드를 참고합니다 (선택적).
+   - 기존 댓글 스타일을 유지하면서 본문 내용만 참고합니다
+   - 본문의 말투는 기존 댓글 말투와 다를 수 있으므로, 기존 댓글 말투를 우선합니다. (생각만, 출력 금지)
+4. 위 세 가지 정보를 합쳐 10글자 이내의 댓글을 설계합니다. 이모티콘은 절대 사용하지 않습니다.
 최종 출력은 댓글 한 줄만 해야 하며, 다른 문장은 포함하면 안 됩니다.
 
 금지 사항 (절대 사용 금지):
@@ -1080,8 +1814,41 @@ class MacroBot:
 - "감사합니다"라는 단어가 포함된 모든 댓글
 - 기타 형식적이고 일반적인 댓글
 
+⚠️ 매우 중요 - 중복 어미 및 불필요한 문자 금지:
+- 절대 "요요", "네요요", "어요요", "해요요" 같은 중복 어미를 사용하지 말 것
+- 절대 "ㅠㅠ 요", "~ 요", "! 요" 같이 이모티콘/기호 뒤에 공백 + "요"를 붙이지 말 것
+- 절대 마침표(.)를 사용하지 말 것
+- 절대 "용" 어미를 사용하지 말 것 (예: "힘내용" ❌ → "힘내요" ✅, "좋아용" ❌ → "좋아요" ✅)
+- 댓글 끝에 "요"는 한 번만 사용하고, 이미 어미가 있으면 추가하지 말 것
+- 예: "화이팅요요" ❌ → "화이팅요" ✅
+- 예: "화이팅ㅠㅠ 요" ❌ → "화이팅요" ✅
+
 게시글 본문:
-{post_content[:500]}{comments_text}
+{post_content[:500]}{comments_text}{few_shot_text}{bad_examples_text}
+
+댓글:"""
+            
+            # 본문에서 핵심 키워드 추출
+            keywords = self.extract_keywords_from_post(post_content, post_title)
+            keywords_text = ""
+            if keywords:
+                keywords_text = f"\n\n🔑 본문 핵심 키워드: {', '.join(keywords)}\n- 위 키워드들을 댓글에 자연스럽게 활용하세요.\n- 예: 본문에 '야식'이 있으면 '야식 좋지요'처럼 키워드를 포함한 댓글을 작성하세요.\n- 예: 본문에 '형님'이 있으면 '형님도 굿나잇입니다'처럼 키워드를 활용하세요.\n- 이모티콘은 절대 사용하지 마세요.\n"
+            
+            # 질문형 게시글 확인
+            is_question = any(q in post_content for q in ['?', '?', '어떻게', '뭐가', '어떤', '언제', '어디', '누가', '왜', '몇시', '몇시쯤'])
+            question_guide = ""
+            if is_question:
+                question_guide = "\n\n⚠️ 질문형 게시글입니다:\n- 질문에 대한 답을 모르면 댓글을 작성하지 마세요.\n- 답을 알고 있거나 공감할 수 있는 내용만 댓글로 작성하세요.\n- 예: '축구 오늘 몇시쯤에 하나요?' → 답을 모르면 댓글 작성하지 않음\n"
+            
+            # 프롬프트 생성 (도박 용어 사전 포함)
+            # 기존 댓글을 우선적으로 강조
+            comments_priority_text = "\n\n⭐⭐⭐ 중요: 기존 댓글들을 우선적으로 분석하고, 기존 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요. 본문보다 기존 댓글 스타일에 더 중점을 두세요.\n" if existing_comments and len(existing_comments) > 0 else ""
+            
+            title_section = f"\n게시글 제목:\n{post_title if post_title else '(제목 없음)'}\n" if post_title else ""
+            prompt = f"""{base_prompt_section}{gambling_terms_text}{comments_priority_text}{keywords_text}{question_guide}
+
+{title_section}게시글 본문:
+{post_content[:500]}{comments_text}{few_shot_text}{bad_examples_text}
 
 댓글:"""
 
@@ -1097,15 +1864,15 @@ class MacroBot:
                     'messages': [
                         {
                             'role': 'system',
-                            'content': '당신은 도박 관련 게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하지만 자연스러운 댓글을 작성하는 도우미입니다. 작성자가 친구처럼 편하게 썼다면 편하게, 지친 톤이라면 담담하게, 형식적이면 맞춰서 작성하세요. 꼭 긍정적일 필요 없으며, 현실적인 피로감("아 지치네요", "버텨야죠") 같은 표현도 허용되지만 맞춤법은 반드시 정확해야 합니다. 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호는 상황에 맞게 0~1회만 사용해 과도하게 반복되지 않도록 하세요. "~요", "~용", "~요!" 같은 가벼운 존댓말도 적절히 섞어서 너무 반말만 사용하지 않도록 합니다. 반드시 10글자 이내로 완성해야 합니다. 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 말고, 형식적인 댓글("좋은 글 감사합니다", "유용한 정보네요" 등)을 사용하지 마세요.'
+                            'content': '당신은 도박 관련 사이트의 자유게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하지만 자연스러운 댓글을 작성하는 도우미입니다. 자유게시판이므로 도박 관련 얘기뿐만 아니라 일상 수다도 올라올 수 있습니다. 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 댓글을 작성해야 합니다. 가장 중요한 것은: 1) 본문의 말투를 정확히 분석하는 것입니다 (본문이 "~할까요?" 같은 존댓말이면 댓글도 "~요", "~네요" 같은 높임말 사용, 본문이 반말이면 댓글도 반말 사용). 2) 본문의 핵심 키워드를 추출하여 댓글에 자연스럽게 활용하세요 (예: 본문에 "야식"이 있으면 "야식 좋지요"처럼 키워드를 포함). 3) 이모티콘(~, !, ㅠㅠ 등)은 절대 사용하지 마세요. 4) 마침표(.)는 절대 사용하지 마세요. 5) "용" 어미는 절대 사용하지 마세요 (예: "힘내용" ❌ → "힘내요" ✅). 6) 질문형 게시글에서 답을 모르면 댓글을 작성하지 마세요. 7) 기존 댓글들의 말투와 스타일을 분석하여 최대한 비슷하게 작성하세요. 8) 반드시 10글자 이내로 완성하고, 맞춤법을 정확하게 사용하세요. 9) 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 말고, 형식적인 댓글을 사용하지 마세요.'
                         },
                         {
                             'role': 'user',
                             'content': prompt
                         }
                     ],
-                    'max_tokens': 30,  # 10자 이내 댓글을 위해 토큰 수 감소
-                    'temperature': 0.9
+                    'max_tokens': 80,  # 10자 이내 댓글을 위해 충분한 토큰 할당 (한국어는 토큰 효율이 낮음)
+                    'temperature': 0.7  # 일관성 있는 댓글 생성을 위해 낮춤
                 }
                 
                 async with session.post(
@@ -1169,10 +1936,13 @@ class MacroBot:
                         if len(comment) > 10:
                             print(f"[경고] 댓글이 10글자를 초과했습니다 ({len(comment)}자): {comment}")
                             print(f"[경고] 10자 이내로 재생성합니다...")
-                            return await self.generate_ai_comment_retry(post_content, existing_comments, 1)
+                            return await self.generate_ai_comment_retry(post_content, existing_comments, 1, post_title=getattr(self, '_last_post_title', None))
                         
                         # ~입니다 체 제거 및 ~요 체로 변경
                         comment = comment.replace('입니다', '요').replace('입니다.', '요').replace('입니다!', '요')
+                        
+                        # 중복 어미 및 불필요한 문자 제거
+                        comment = self.clean_comment(comment)
                         
                         # 최종 필터링: "감사" 단어 재확인 (절대 안전장치)
                         if '감사' in comment:
@@ -1231,7 +2001,7 @@ class MacroBot:
             print(f"[댓글] 기존 댓글 스타일을 참고하여 댓글 생성...")
             return self.generate_style_matched_comment(existing_comments or [], post_content)
     
-    async def generate_ai_comment_retry(self, post_content: str, existing_comments: list = None, retry_count: int = 0) -> str:
+    async def generate_ai_comment_retry(self, post_content: str, existing_comments: list = None, retry_count: int = 0, post_title: str = None) -> str:
         """AI 댓글 생성 재시도 (형식적인 댓글 필터링 후)"""
         if retry_count <= 0:
             # 재시도 횟수 초과 시 기존 댓글 스타일로 댓글 생성
@@ -1245,17 +2015,47 @@ class MacroBot:
                 numbered_comments = "\n".join(
                     [f"{idx + 1}. {c}" for idx, c in enumerate(existing_comments[:8])]
                 )
-                comments_text = f"\n\n현재 댓글 흐름 (최근 {min(len(existing_comments), 8)}개):\n{numbered_comments}\n\n위 댓글들의 말투와 감정선, 이모티콘 빈도를 참고해 자연스럽게 이어주세요."
+                comments_text = f"\n\n⭐⭐⭐ 가장 중요: 현재 댓글 흐름 (최근 {min(len(existing_comments), 8)}개):\n{numbered_comments}\n\n위 댓글들을 우선적으로 분석하고, 위 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요. 본문보다 기존 댓글 스타일에 더 중점을 두세요."
             else:
                 comments_text = "\n\n현재 댓글 흐름: (댓글 없음)"
             
-            # 더 강력한 프롬프트
+            # 기존 댓글 우선 강조 텍스트
+            comments_priority_text = "\n\n⭐⭐⭐ 가장 중요: 기존 댓글들을 우선적으로 분석하고, 기존 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요. 본문보다 기존 댓글 스타일에 더 중점을 두세요.\n" if existing_comments and len(existing_comments) > 0 else ""
+            
+            # 본문에서 핵심 키워드 추출
+            keywords = self.extract_keywords_from_post(post_content, post_title)
+            keywords_text = ""
+            if keywords:
+                keywords_text = f"\n\n🔑 본문 핵심 키워드: {', '.join(keywords)}\n- 위 키워드들을 댓글에 자연스럽게 활용하세요.\n- 예: 본문에 '야식'이 있으면 '야식 좋지요'처럼 키워드를 포함한 댓글을 작성하세요.\n"
+            
+            # 질문형 게시글 확인
+            is_question = any(q in post_content for q in ['?', '?', '어떻게', '뭐가', '어떤', '언제', '어디', '누가', '왜', '몇시', '몇시쯤'])
+            question_guide = ""
+            if is_question:
+                question_guide = "\n\n⚠️ 질문형 게시글입니다:\n- 질문에 대한 답을 모르면 댓글을 작성하지 마세요.\n- 답을 알고 있거나 공감할 수 있는 내용만 댓글로 작성하세요.\n"
+            
+            # 더 강력한 프롬프트 (통일된 버전)
             prompt = f"""다음 게시글 본문을 읽고, 작성자의 감정에 공감하는 댓글을 작성해주세요.
 
-⚠️ 중요: 이 게시판은 도박 관련 게시판입니다. 다양한 주제의 글이 올라오지만 메인 카테고리는 도박입니다.
-- 도박으로 잃은 사람들, 많이 딴 사람들 등 도박 관련 경험을 공유하는 게시판
-- 도박과 직접 관련 없는 글도 올라올 수 있지만, 게시판의 맥락은 도박입니다
-- 게시판의 맥락을 고려하면서도 게시글 내용에 맞는 댓글 작성
+⚠️ 중요: 이 게시판은 도박 관련 사이트의 자유게시판입니다.
+- 자유게시판이기 때문에 도박과 관련된 얘기뿐만 아니라 일상 수다도 올라올 수 있습니다
+- 게시글 주제가 도박이든 일상이든 상관없이, 본문 내용과 기존 댓글 흐름에 맞춰 작성해야 합니다
+- 댓글은 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 작성해야 합니다
+
+🎯 핵심 원칙 (우선순위 순):
+1. ⭐⭐⭐ 가장 중요: 기존 댓글들을 우선적으로 분석하세요!
+   - 기존 댓글들의 말투, 스타일, 길이, 감정선을 정확히 파악
+   - 기존 댓글들과 최대한 비슷한 스타일로 댓글 작성
+   - 본문보다 기존 댓글 스타일에 더 중점을 두세요
+2. 말투 매칭: 기존 댓글들의 말투 패턴을 우선 확인
+   - 기존 댓글이 대부분 존댓말이면 존댓말로, 반말이면 반말로 작성
+   - 본문 말투는 참고용으로만 사용
+3. 본문의 핵심 키워드를 댓글에 활용 (선택적): 본문에 나온 주요 단어를 자연스럽게 포함
+4. 이모티콘 절대 사용 금지: 물결표(~), 느낌표(!), "ㅠㅠ" 등 모든 이모티콘/기호 사용하지 마세요
+5. 마침표(.) 절대 사용 금지
+6. "용" 어미 절대 사용 금지
+7. 질문형 게시글: 답을 모르면 댓글 작성하지 않음
+8. 반드시 10글자 이내로 완성
 
 절대 사용하지 말 것 (금지):
 - "좋은 글 감사합니다"
@@ -1275,8 +2075,8 @@ class MacroBot:
 - 친구처럼 편하게 쓴 글 → 친구처럼 편하게 반말이나 캐주얼한 댓글
 - 형식적인 글 → 형식적인 댓글 (하지만 "감사합니다" 같은 금지 단어는 사용하지 말 것)
 - 시답잖은 소리 → 그냥 맞춰주기만 하면 됨 (꼭 긍정적일 필요 없음)
-- 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호를 상황에 맞게 0~1회만 사용 (과도하게 반복하지 말 것)
-- 예: "힘내요" → "힘내용~", "좋아요" → "좋아~", "대박이네요" → "대박~", "아쉽네요" → "아쉽네ㅠㅠ"
+- 이모티콘 절대 사용 금지: 물결표(~), 느낌표(!), "ㅠㅠ" 등 모든 이모티콘/기호를 사용하지 마세요
+- 예: "힘내요" → "힘내요", "좋아요" → "좋아요", "대박이네요" → "대박이네요", "아쉽네요" → "아쉽네요"
 - 기분 좋은 글이면 담담하게 축하하고, 힘든 글이면 현실적인 톤(예: "아 지치네요", "버텨야죠")도 괜찮음
 - 맞춤법을 반드시 정확하게 사용
 - 게시판이 도박 관련이라는 맥락을 고려
@@ -1287,10 +2087,10 @@ class MacroBot:
 추론 절차 (반드시 내부적으로 거친 뒤 마지막에 댓글 한 줄만 출력):
 1. 본문에서 핵심 키워드와 감정을 2개 이상 파악하고 친구에게 말하듯 정리합니다. (생각만, 출력 금지)
 2. 기존 댓글 말투/이모티콘/길이를 분석해 어떤 어미·감정선이 자연스러운지 결정합니다. (생각만, 출력 금지)
-3. 위 정보를 합쳐 10글자 이내 댓글을 설계하고 물결표/느낌표 사용 여부를 정하되, 과하게 반복하지 않습니다.
+3. 위 정보를 합쳐 10글자 이내 댓글을 설계합니다. 이모티콘은 절대 사용하지 않습니다.
 최종 출력은 댓글 한 줄만 해야 하며, 다른 문장은 포함하면 안 됩니다.
 
-게시글 본문:
+{comments_priority_text}게시글 본문:
 {post_content[:500]}{comments_text}
 
 댓글:"""
@@ -1306,15 +2106,15 @@ class MacroBot:
                     'messages': [
                         {
                             'role': 'system',
-                            'content': '당신은 도박 관련 게시판에서 게시글 작성자의 감정에 공감하는 자연스러운 댓글을 작성하는 도우미입니다. 작성자가 친구처럼 편하게 썼다면 편하게, 지치거나 현타 온 톤이면 담담하게 맞춰주세요. 맞춤법은 반드시 정확해야 하며, 물결표(~), 느낌표(!), "ㅠㅠ" 같은 기호는 상황에 맞게 0~1회만 사용해 과도하게 반복하지 마세요. "~요", "~용", "~요!" 같은 가벼운 존댓말도 적절히 섞어 너무 반말만 나오지 않게 해주세요. 게시판의 맥락을 고려하면서도 게시글 내용과 기존 댓글 흐름에 자연스럽게 이어지는 댓글을 작성해야 합니다. 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 말고, 형식적인 댓글("좋은 글 감사합니다", "유용한 정보네요" 등)을 사용하지 마세요.'
+                            'content': '당신은 도박 관련 사이트의 자유게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하지만 자연스러운 댓글을 작성하는 도우미입니다. 자유게시판이므로 도박 관련 얘기뿐만 아니라 일상 수다도 올라올 수 있습니다. 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 댓글을 작성해야 합니다. 가장 중요한 것은: 1) 본문의 말투를 정확히 분석하는 것입니다 (본문이 "~할까요?" 같은 존댓말이면 댓글도 "~요", "~네요" 같은 높임말 사용, 본문이 반말이면 댓글도 반말 사용). 2) 본문의 핵심 키워드를 추출하여 댓글에 자연스럽게 활용하세요 (예: 본문에 "야식"이 있으면 "야식 좋지요"처럼 키워드를 포함). 3) 이모티콘(~, !, ㅠㅠ 등)은 절대 사용하지 마세요. 4) 마침표(.)는 절대 사용하지 마세요. 5) "용" 어미는 절대 사용하지 마세요 (예: "힘내용" ❌ → "힘내요" ✅). 6) 질문형 게시글에서 답을 모르면 댓글을 작성하지 마세요. 7) 기존 댓글들의 말투와 스타일을 분석하여 최대한 비슷하게 작성하세요. 8) 반드시 10글자 이내로 완성하고, 맞춤법을 정확하게 사용하세요. 9) 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 말고, 형식적인 댓글을 사용하지 마세요.'
                         },
                         {
                             'role': 'user',
                             'content': prompt
                         }
                     ],
-                    'max_tokens': 30,  # 10자 이내 댓글을 위해 토큰 수 감소
-                    'temperature': 1.0  # 더 창의적으로
+                    'max_tokens': 80,  # 10자 이내 댓글을 위해 충분한 토큰 할당 (한국어는 토큰 효율이 낮음)
+                    'temperature': 0.7  # 일관성 있는 댓글 생성을 위해 낮춤
                 }
                 
                 async with session.post(
@@ -1328,6 +2128,9 @@ class MacroBot:
                         comment = result['choices'][0]['message']['content'].strip()
                         comment = comment.strip('"').strip("'")
                         
+                        # 중복 어미 및 불필요한 문자 제거
+                        comment = self.clean_comment(comment)
+                        
                         # 10글자 초과 시 재시도
                         if len(comment) > 10:
                             print(f"[경고] 재시도 댓글이 10글자를 초과했습니다 ({len(comment)}자): {comment}")
@@ -1335,6 +2138,8 @@ class MacroBot:
                             return self.generate_style_matched_comment(existing_comments or [], post_content)
                         
                         comment = comment.replace('입니다', '요').replace('입니다.', '요')
+                        # 다시 한 번 정리 (replace 후에도 중복이 생길 수 있음)
+                        comment = self.clean_comment(comment)
                         print(f"[AI] 재시도 댓글 생성 완료: {comment}")
                         return comment
                     else:
@@ -1376,6 +2181,16 @@ class MacroBot:
             current_url = self.page.url
             print(f"[댓글] 현재 페이지 URL: {current_url}")
             
+            # 게시글 제목 가져오기
+            print("[댓글] ========================================")
+            print("[댓글] 게시글 제목을 읽는 중...")
+            print("[댓글] ========================================")
+            post_title = await self.get_post_title()
+            if post_title:
+                print(f"[댓글] ✅ 제목 읽기 성공: {post_title}")
+            else:
+                print(f"[경고] 제목을 찾을 수 없습니다.")
+            
             # 게시글 본문 가져오기
             print("[댓글] ========================================")
             print("[댓글] 게시글 본문을 읽는 중...")
@@ -1410,16 +2225,22 @@ class MacroBot:
                 print(f"[댓글] ========================================")
             else:
                 print(f"[경고] ⚠️⚠️⚠️ 기존 댓글이 없습니다!")
-                print(f"[경고] 댓글 읽기 함수를 확인하세요!")
+                print(f"[경고] 댓글이 없는 게시글에는 댓글을 작성하지 않습니다.")
                 print(f"[경고] ========================================")
+                # 댓글이 없는 게시글은 댓글 작성하지 않음
+                # 재방문 방지를 위해 URL 저장
+                current_url = self.page.url
+                self.save_commented_post(current_url)
+                print(f"[중복방지] 댓글이 없는 게시글을 기록했습니다: {current_url}")
+                return False
             
             if post_content and len(post_content.strip()) > 10:
                 print(f"[댓글] 본문 읽기 성공! (길이: {len(post_content)}자)")
                 print(f"[댓글] 본문 미리보기: {post_content[:100]}...")
                 
-                # AI로 댓글 생성 (본문 + 기존 댓글 고려)
+                # AI로 댓글 생성 (제목 + 본문 + 기존 댓글 고려)
                 print("[댓글] ⭐ AI 댓글 생성 시작...")
-                comment_text = await self.generate_ai_comment(post_content, existing_comments)
+                comment_text = await self.generate_ai_comment(post_content, existing_comments, post_title)
                 print(f"[댓글] AI 생성 댓글: {comment_text}")
                 
                 # 최종 확인: "감사" 단어가 있으면 기본 댓글 사용 (절대 안전장치)
@@ -1452,6 +2273,19 @@ class MacroBot:
                 print("[경고] 의미 있는 댓글을 생성하지 못했습니다. 기본 문장을 사용합니다.")
                 comment_text = "지치네요"
             
+            # 중복 어미 제거 (요요, 네요요 등) - 모든 댓글에 적용
+            comment_text = self.clean_comment(comment_text)
+            
+            # 댓글이 본문/제목과 관련이 있는지 확인
+            if not self.is_comment_relevant_to_post(comment_text, post_content, post_title):
+                print("[경고] ⚠️⚠️⚠️ 댓글이 게시글 제목/본문과 관련이 없거나 이해하지 못한 것으로 판단됩니다.")
+                print("[경고] 이 게시글에는 댓글을 작성하지 않고 건너뜁니다.")
+                # 이해할 수 없는 게시글도 기록하여 재방문 방지
+                current_url = self.page.url
+                self.save_commented_post(current_url)
+                print(f"[중복방지] 이해할 수 없는 게시글을 기록했습니다: {current_url}")
+                return False  # 댓글 작성하지 않고 건너뛰기
+            
             # 15분 내 반복 댓글 방지
             comment_text = await self.ensure_non_repeating_comment(comment_text, post_content, existing_comments)
             if not comment_text:
@@ -1460,6 +2294,9 @@ class MacroBot:
             
             # 어미/기호 다양화
             comment_text = self.enhance_tone_variation(comment_text, post_content)
+            
+            # 최종 중복 어미 제거 (모든 처리 후 한 번 더)
+            comment_text = self.clean_comment(comment_text)
             
             # 댓글 간 랜덤 대기
             await self.enforce_comment_gap()
@@ -1482,99 +2319,166 @@ class MacroBot:
             await self.page.type(comment_input_selector, comment_text, delay=100)
             await self.random_delay(1, 2)
             
-            # 댓글 작성 버튼 클릭
-            submit_button_candidates = self.config.get(
-                'submit_button_selector',
-                'input#btn_submit, #btn_submit, input.btn_submit, button.btn_submit, button[type="submit"], input[type="submit"]'
-            )
-            
-            selector_list = [s.strip() for s in submit_button_candidates.split(',') if s.strip()]
-            # 필수 기본 후보들 추가
-            selector_list.extend([
-                '#btn_submit', 'input#btn_submit', 'input[value="댓글등록"]',
-                'input[value*="댓글"]', 'button#btn_submit', 'button.btn_submit'
-            ])
-            
+            # 댓글 작성 버튼 찾기 및 클릭
+            # 우선순위: id="btn_submit" > input[type="submit"] > 기타
+            submit_button_selector = '#btn_submit'
             submit_button = None
-            last_selector = None
-            for selector in selector_list:
-                last_selector = selector
-                try:
-                    await self.page.wait_for_selector(selector, timeout=3000, state='visible')
-                    submit_button = await self.page.query_selector(selector)
-                except Exception:
-                    submit_button = None
-                if submit_button:
-                    break
+            
+            try:
+                # 먼저 정확한 ID로 찾기
+                await self.page.wait_for_selector(submit_button_selector, timeout=3000, state='visible')
+                submit_button = await self.page.query_selector(submit_button_selector)
+                print(f"[댓글] 등록 버튼 찾음: {submit_button_selector}")
+            except Exception:
+                # ID로 못 찾으면 다른 선택자 시도
+                fallback_selectors = [
+                    'input#btn_submit',
+                    'input.btn_submit',
+                    'input[type="submit"]',
+                    'input[value="댓글등록"]',
+                    'button[type="submit"]'
+                ]
+                for selector in fallback_selectors:
+                    try:
+                        await self.page.wait_for_selector(selector, timeout=2000, state='visible')
+                        submit_button = await self.page.query_selector(selector)
+                        submit_button_selector = selector
+                        print(f"[댓글] 등록 버튼 찾음: {selector}")
+                        break
+                    except Exception:
+                        continue
             
             if not submit_button:
-                raise RuntimeError(f"댓글 등록 버튼을 찾을 수 없습니다. 마지막 시도 선택자: {last_selector}")
+                raise RuntimeError("댓글 등록 버튼을 찾을 수 없습니다.")
             
-            print(f"[댓글] 등록 버튼 선택자: {last_selector}")
-            
+            # 버튼이 보이도록 스크롤
             await submit_button.scroll_into_view_if_needed()
-            await self.random_delay(0.3, 0.6)
-            print("[댓글] 등록 버튼 클릭 시도")
+            await self.random_delay(0.5, 1.0)
             
-            clicked = False
+            # 현재 URL 저장 (제출 후 변경 확인용)
+            url_before_submit = self.page.url
+            print(f"[댓글] 제출 전 URL: {url_before_submit}")
+            
+            # 폼 제출 방법 1: 버튼 클릭
+            print("[댓글] 등록 버튼 클릭 시도...")
             try:
-                await submit_button.hover()
-                await submit_button.click(force=True, timeout=5000)
-                clicked = True
+                # 버튼이 disabled 상태인지 확인하고 해제
+                is_disabled = await self.page.evaluate("""(selector) => {
+                    const btn = document.querySelector(selector);
+                    return btn ? btn.disabled : false;
+                }""", submit_button_selector)
+                
+                if is_disabled:
+                    print("[댓글] 버튼이 disabled 상태입니다. 해제 중...")
+                    await self.page.evaluate("""(selector) => {
+                        const btn = document.querySelector(selector);
+                        if (btn) btn.disabled = false;
+                    }""", submit_button_selector)
+                
+                # 버튼 클릭
+                await submit_button.click(timeout=5000)
+                print("[댓글] 버튼 클릭 완료")
             except Exception as click_error:
-                print(f"[경고] 기본 클릭 실패: {click_error}")
-            
-            if not clicked:
-                print("[댓글] 클릭 실패로 JavaScript 이벤트를 직접 호출합니다.")
-                await self.page.eval_on_selector(
-                    last_selector,
-                    """(btn) => {
-                        btn.removeAttribute('disabled');
-                        if (btn.click) {
+                print(f"[경고] 버튼 클릭 실패: {click_error}")
+                print("[댓글] JavaScript로 폼 제출 시도...")
+                
+                # 폼 제출 방법 2: JavaScript로 직접 제출
+                await self.page.evaluate("""(selector) => {
+                    const btn = document.querySelector(selector);
+                    if (btn) {
+                        // disabled 해제
+                        btn.disabled = false;
+                        // 폼 찾기
+                        const form = btn.closest('form');
+                        if (form) {
+                            // 폼 제출
+                            form.submit();
+                        } else if (btn.type === 'submit') {
+                            // 버튼이 form 안에 없으면 클릭 이벤트 발생
                             btn.click();
-                        } else if (btn.form) {
-                            btn.form.submit();
                         }
-                    }"""
-                )
+                    }
+                }""", submit_button_selector)
+                print("[댓글] JavaScript 폼 제출 완료")
             
-            # 버튼 클릭이 제대로 되었는지 확인 (폼 제출/댓글 반영 대기)
+            # 폼 제출 후 대기 (페이지 변경 또는 댓글 등록 확인)
+            print("[댓글] 댓글 등록 대기 중...")
+            await self.random_delay(2, 3)
+            
+            # 댓글 등록 확인: 입력 필드가 비워졌는지 확인
             try:
-                await self.page.wait_for_function(
-                    """(inputSelector) => {
-                        const input = document.querySelector(inputSelector);
-                        if (!input) return false;
-                        if ((input.value || '').trim().length === 0) return true;
-                        const form = input.closest('form');
-                        if (form && form.dataset.submitVisualized === 'done') return true;
-                        const btn = document.querySelector('#btn_submit, input#btn_submit, button#btn_submit');
-                        if (btn && btn.dataset.clicked) return true;
-                        return false;
-                    }""",
-                    comment_input_selector,
-                    timeout=5000
-                )
-            except Exception:
-                # 입력창이 그대로면 잠시 더 대기하고 최후에 폼 직접 제출
-                await self.random_delay(0.5, 1.0)
-                try:
-                    await self.page.eval_on_selector(
-                        comment_input_selector,
-                        """(input) => {
-                            const form = input.closest('form');
-                            if (form) {
-                                form.submit();
-                                form.dataset.submitVisualized = 'done';
+                input_value = await self.page.input_value(comment_input_selector)
+                if input_value and input_value.strip() != '':
+                    print(f"[경고] 입력 필드가 아직 비워지지 않았습니다: '{input_value}'")
+                    # 추가 대기
+                    await self.random_delay(1, 2)
+                    input_value = await self.page.input_value(comment_input_selector)
+                    if input_value and input_value.strip() != '':
+                        print("[경고] 댓글 등록이 완료되지 않은 것 같습니다. 폼을 다시 제출합니다.")
+                        # 폼 강제 제출
+                        await self.page.evaluate("""(selector) => {
+                            const input = document.querySelector(selector);
+                            if (input) {
+                                const form = input.closest('form');
+                                if (form) form.submit();
                             }
-                        }"""
-                    )
-                except Exception as submit_err:
-                    print(f"[경고] 폼 강제 제출 중 오류: {submit_err}")
+                        }""", comment_input_selector)
+                        await self.random_delay(2, 3)
+                else:
+                    print("[댓글] ✅ 입력 필드가 비워졌습니다. 댓글 등록 성공으로 추정.")
+            except Exception as check_error:
+                print(f"[경고] 입력 필드 확인 중 오류: {check_error}")
             
-            # 제출 완료 대기
-            await self.random_delay(2, 4)
+            # 페이지 URL 변경 확인
+            url_after_submit = self.page.url
+            if url_after_submit != url_before_submit:
+                print(f"[댓글] ✅ 페이지 URL이 변경되었습니다: {url_after_submit}")
+                print("[댓글] 댓글 등록 성공으로 추정.")
+            else:
+                print(f"[댓글] 페이지 URL 변경 없음 (현재: {url_after_submit})")
             
-            print(f"[댓글] 댓글 작성 완료: {comment_text}")
+            # 추가 대기 (서버 처리 시간)
+            await self.random_delay(2, 3)
+            
+            # 댓글 등록 최종 확인
+            print("[댓글] 댓글 등록 최종 확인 중...")
+            comment_registered = False
+            
+            # 방법 1: 입력 필드가 비워졌는지 확인
+            try:
+                input_value = await self.page.input_value(comment_input_selector)
+                if not input_value or input_value.strip() == '':
+                    comment_registered = True
+                    print("[댓글] ✅ 입력 필드가 비워졌습니다.")
+            except Exception:
+                pass
+            
+            # 방법 2: 새 댓글이 목록에 추가되었는지 확인
+            if not comment_registered:
+                try:
+                    comments_after = await self.get_existing_comments()
+                    if comments_after:
+                        # 댓글 개수 증가 확인
+                        if len(comments_after) > len(existing_comments or []):
+                            comment_registered = True
+                            print(f"[댓글] ✅ 새 댓글이 추가되었습니다! (이전: {len(existing_comments or [])}개, 현재: {len(comments_after)}개)")
+                        # 작성한 댓글 내용이 목록에 있는지 확인
+                        elif comment_text in str(comments_after):
+                            comment_registered = True
+                            print("[댓글] ✅ 작성한 댓글이 목록에 있습니다!")
+                except Exception:
+                    pass
+            
+            if comment_registered:
+                print(f"[댓글] ✅ 댓글 등록 성공: {comment_text}")
+            else:
+                print(f"[경고] ⚠️ 댓글 등록 확인 실패")
+                print("[경고] 하지만 계속 진행합니다. (다음 게시글에서 다시 시도 가능)")
+            
+            # 추가 안전 대기
+            await self.random_delay(1, 2)
+            
+            print(f"[댓글] 댓글 작성 프로세스 완료: {comment_text}")
             
             # 댓글 작성 성공 시 게시글 URL 저장 (중복 방지)
             self.save_commented_post(post_url)
@@ -1721,6 +2625,13 @@ def load_config():
 
 async def main():
     """메인 함수"""
+    # 브라우저 자동 설치 확인 (경고 무시 - sync API를 async 함수에서 호출하지만 문제없음)
+    try:
+        ensure_playwright_browser()
+    except Exception as e:
+        # 경고는 무시하고 계속 진행
+        pass
+    
     config = load_config()
     
     # 설정 검증

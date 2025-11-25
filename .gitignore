@@ -6,3 +6,12 @@ __pycache__/
 
 .env.backup
 
+# Python 패키지 (설치 시 자동 생성)
+Lib/
+Scripts/
+*.pyc
+*.pyo
+*.pyd
+
+# 개발자용 파일
+개발자용/
