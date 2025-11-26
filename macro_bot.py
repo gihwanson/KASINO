@@ -19,81 +19,85 @@ load_dotenv()
 
 def ensure_playwright_browser():
     """Playwright 브라우저가 설치되어 있는지 확인하고 없으면 자동 설치"""
+    # 실행파일인 경우 즉시 확인만 하고 설치 시도하지 않음
+    is_frozen = getattr(sys, 'frozen', False)
+    
+    # 실행파일인 경우 브라우저 확인을 건너뛰고 바로 False 반환
+    if is_frozen:
+        return False
+    
     try:
         # 브라우저가 설치되어 있는지 확인
         from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            try:
-                browser = p.chromium.launch(headless=True)
-                browser.close()
-                return True
-            except Exception:
-                # 브라우저가 없으면 설치
-                print("[알림] Playwright 브라우저가 설치되어 있지 않습니다.")
-                print("[알림] 브라우저를 자동으로 설치하는 중... (처음 실행 시 한 번만 설치됩니다)")
-                print("      (이 작업은 몇 분 정도 걸릴 수 있습니다)")
-                print()
-                
-                # playwright install chromium 실행
+        
+        # 먼저 브라우저 실행 가능 여부 확인
+        try:
+            with sync_playwright() as p:
                 try:
-                    if getattr(sys, 'frozen', False):
-                        # 실행 파일인 경우
-                        # PyInstaller로 만든 실행 파일에서는 playwright install을 직접 실행하기 어려움
-                        # 대신 playwright의 내부 설치 메커니즘 사용 시도
-                        try:
-                            # playwright의 설치 함수 직접 호출
-                            from playwright.sync_api import sync_playwright
-                            # playwright install은 내부적으로 처리됨
-                            # 하지만 직접 호출이 어려우므로 subprocess로 시도
-                            # 실행 파일 자체를 Python 인터프리터처럼 사용
-                            result = subprocess.run(
-                                [sys.executable, "-c", "import subprocess, sys; subprocess.run([sys.executable, '-m', 'playwright', 'install', 'chromium'])"],
-                                check=True,
-                                timeout=600  # 10분 타임아웃
-                            )
-                        except Exception:
-                            # 실패하면 사용자에게 안내
-                            raise Exception("자동 설치 실패")
-                    else:
-                        # Python 스크립트인 경우
-                        result = subprocess.run(
-                            [sys.executable, "-m", "playwright", "install", "chromium"],
-                            check=True,
-                            timeout=600,  # 10분 타임아웃
-                            capture_output=True,
-                            text=True
-                        )
-                    
-                    print("[완료] 브라우저 설치가 완료되었습니다!")
-                    print()
+                    browser = p.chromium.launch(headless=True)
+                    browser.close()
                     return True
-                except subprocess.TimeoutExpired:
-                    print("[오류] 브라우저 설치 시간 초과")
-                    print("[안내] 네트워크 연결을 확인하고 다시 시도하세요.")
-                    return False
-                except subprocess.CalledProcessError as e:
-                    print(f"[오류] 브라우저 설치 실패")
-                    print()
-                    print("[안내] 수동 설치 방법:")
-                    if getattr(sys, 'frozen', False):
-                        print("  1. Python을 설치하세요 (https://www.python.org/downloads/)")
-                        print("  2. 다음 명령어 실행: python -m playwright install chromium")
+                except Exception as launch_error:
+                    # 브라우저 실행 실패 - Python 스크립트인 경우 설치 시도
+                    error_msg = str(launch_error).lower()
+                    if "executable doesn't exist" in error_msg or "browser not found" in error_msg:
+                        # 브라우저가 없으면 설치 시도
+                        pass
                     else:
-                        print("  python -m playwright install chromium")
-                    print()
-                    return False
-                except Exception as install_error:
-                    print(f"[오류] 브라우저 설치 중 오류 발생: {install_error}")
-                    print()
-                    print("[안내] 수동 설치 방법:")
-                    if getattr(sys, 'frozen', False):
-                        print("  1. Python을 설치하세요 (https://www.python.org/downloads/)")
-                        print("  2. 다음 명령어 실행: python -m playwright install chromium")
-                    else:
-                        print("  python -m playwright install chromium")
-                    print()
-                    return False
+                        # 다른 오류인 경우
+                        print(f"[경고] 브라우저 실행 오류: {launch_error}")
+                        return False
+        except Exception as sync_error:
+            # sync_playwright 자체가 실패한 경우
+            print(f"[경고] Playwright 초기화 오류: {sync_error}")
+            return False
+        
+        # Python 스크립트인 경우에만 설치 시도
+        print("[알림] Playwright 브라우저가 설치되어 있지 않습니다.")
+        print("[알림] 브라우저를 자동으로 설치하는 중... (처음 실행 시 한 번만 설치됩니다)")
+        print("      (이 작업은 몇 분 정도 걸릴 수 있습니다)")
+        print()
+                
+        # playwright install chromium 실행
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=True,
+                timeout=600,  # 10분 타임아웃
+                capture_output=True,
+                text=True
+            )
+            
+            print("[완료] 브라우저 설치가 완료되었습니다!")
+            print()
+            return True
+        except subprocess.TimeoutExpired:
+            if not is_frozen:
+                print("[오류] 브라우저 설치 시간 초과")
+                print("[안내] 네트워크 연결을 확인하고 다시 시도하세요.")
+            return False
+        except subprocess.CalledProcessError as e:
+            if not is_frozen:
+                print(f"[오류] 브라우저 설치 실패")
+                print()
+                print("[안내] 수동 설치 방법:")
+                print("  python -m playwright install chromium")
+                print()
+            return False
+        except Exception as install_error:
+            # Python 스크립트인 경우에만 메시지 출력
+            if not is_frozen:
+                print(f"[오류] 브라우저 설치 중 오류 발생: {install_error}")
+                print()
+                print("[안내] 수동 설치 방법:")
+                print("  python -m playwright install chromium")
+                print()
+            return False
     except Exception as e:
+        # 실행파일인 경우 즉시 False 반환 (메시지는 main에서 출력)
+        if is_frozen:
+            return False
+        
         error_msg = str(e)
         print(f"[경고] 브라우저 확인 중 오류 발생: {e}")
         
@@ -143,6 +147,7 @@ class MacroBot:
         self.playwright = None
         self.commented_posts_file = 'commented_posts.txt'  # 댓글 작성한 게시글 목록 파일
         self.commented_posts = self.load_commented_posts()  # 이미 댓글 작성한 게시글 목록
+        self.main_page = None  # 원본 Page 객체 (iframe 사용 시 구분)
         self.current_page = 1  # 현재 보고 있는 게시판 페이지
         self.page_direction = 1  # 1: 다음 페이지로, -1: 이전 페이지로 이동
         self.comment_history = []  # (comment_text, timestamp)
@@ -712,7 +717,24 @@ class MacroBot:
         """지정한 게시판 페이지로 이동"""
         target_url = self.build_board_page_url(page_number)
         print(f"[게시판] 페이지 {page_number} 접속 중... ({target_url})")
-        await self.page.goto(target_url, wait_until='networkidle')
+        
+        # Frame을 사용 중이면 원본 page로 복원
+        page_to_use = self.main_page if self.main_page else self.page
+        if page_to_use:
+            # Frame이면 원본 page로 복원
+            if hasattr(page_to_use, 'goto'):
+                await page_to_use.goto(target_url, wait_until='networkidle')
+                self.page = page_to_use  # 원본 page로 복원
+            else:
+                # Frame인 경우 부모 page 사용
+                if self.main_page:
+                    await self.main_page.goto(target_url, wait_until='networkidle')
+                    self.page = self.main_page
+                else:
+                    raise Exception("페이지 객체를 찾을 수 없습니다.")
+        else:
+            raise Exception("페이지 객체를 찾을 수 없습니다.")
+        
         await self.random_delay(2, 4)
 
     async def switch_board_page(self, reason: str = '') -> bool:
@@ -743,17 +765,78 @@ class MacroBot:
     
     async def init_browser(self, headless: bool = False):
         """브라우저 초기화"""
-        if not self.playwright:
-            self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(
-            headless=headless,
-            slow_mo=500  # 동작을 천천히 (디버깅용)
-        )
-        self.page = await self.browser.new_page()
-        # 봇 탐지 방지를 위한 User-Agent 설정
-        await self.page.set_extra_http_headers({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
+        try:
+            if not self.playwright:
+                self.playwright = await async_playwright().start()
+            
+            # 실행파일인 경우 브라우저 경로를 명시적으로 찾기
+            is_frozen = getattr(sys, 'frozen', False)
+            launch_options = {
+                'headless': headless,
+                'slow_mo': 500  # 동작을 천천히 (디버깅용)
+            }
+            
+            if is_frozen:
+                # 실행파일인 경우 시스템에 설치된 브라우저 경로 찾기
+                import platform
+                if platform.system() == 'Windows':
+                    # Windows에서 Playwright 브라우저 경로 찾기
+                    user_home = os.path.expanduser('~')
+                    import glob
+                    
+                    # 가능한 경로 패턴들
+                    possible_patterns = [
+                        os.path.join(user_home, 'AppData', 'Local', 'ms-playwright', 'chromium-*', 'chrome-win', 'chrome.exe'),
+                        os.path.join(user_home, '.cache', 'ms-playwright', 'chromium-*', 'chrome-win', 'chrome.exe'),
+                    ]
+                    
+                    # 실제 경로 찾기
+                    browser_path = None
+                    for pattern in possible_patterns:
+                        matches = glob.glob(pattern)
+                        if matches:
+                            # 가장 최신 버전 찾기 (경로에 버전 번호가 포함됨)
+                            browser_path = sorted(matches, reverse=True)[0]
+                            if os.path.exists(browser_path):
+                                break
+                    
+                    if browser_path and os.path.exists(browser_path):
+                        launch_options['executable_path'] = browser_path
+                        print(f"[정보] 브라우저 경로를 찾았습니다: {browser_path}")
+                    else:
+                        # 브라우저 경로를 찾지 못한 경우
+                        print("[경고] 브라우저 경로를 자동으로 찾지 못했습니다.")
+                        print("[경고] Playwright가 기본 경로에서 브라우저를 찾으려고 시도합니다.")
+            
+            self.browser = await self.playwright.chromium.launch(**launch_options)
+            self.page = await self.browser.new_page()
+            self.main_page = self.page  # 원본 page 저장
+            # 봇 탐지 방지를 위한 User-Agent 설정
+            await self.page.set_extra_http_headers({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            })
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "executable doesn't exist" in error_msg or "browser not found" in error_msg or "chromium" in error_msg:
+                print()
+                print("=" * 60)
+                print("[오류] 브라우저를 찾을 수 없습니다.")
+                print("=" * 60)
+                print()
+                print("브라우저가 설치되어 있지 않거나 찾을 수 없습니다.")
+                print()
+                print("해결 방법:")
+                print("  방법 1 (Python이 설치된 경우 - 권장):")
+                print("    - '브라우저_설치_단독.py' 파일을 더블클릭하여 실행")
+                print("    - 또는 '브라우저_설치_단독.bat' 파일을 더블클릭하여 실행")
+                print()
+                print("  방법 2 (Python이 없는 경우):")
+                print("    1. Python을 설치하세요 (https://www.python.org/downloads/)")
+                print("    2. 위 방법 1을 사용하세요")
+                print()
+                raise Exception("브라우저를 찾을 수 없습니다. 위 방법으로 브라우저를 설치하세요.")
+            else:
+                raise
 
     async def reset_browser(self, headless: bool = False):
         """브라우저를 완전히 재시작"""
@@ -793,12 +876,47 @@ class MacroBot:
         # 로그인 폼 찾기 및 입력
         # 실제 사이트에 맞게 선택자를 수정해야 합니다
         try:
-            # 사용자명 입력 필드
+            # 사용자명 입력 필드 - 여러 선택자 시도
             username_selector = self.config.get('username_selector', 'input[name="username"]')
             print(f"[로그인] 사용자명 입력 필드 찾는 중: {username_selector}")
             
-            # 요소가 로드될 때까지 대기
-            await self.page.wait_for_selector(username_selector, timeout=10000)
+            # 여러 선택자 시도
+            possible_selectors = [
+                username_selector,
+                'input[type="text"]',
+                'input[id*="id"]',
+                'input[id*="user"]',
+                'input[name*="id"]',
+                'input[name*="user"]',
+                'input.mb_id',
+                'input#mb_id',
+                'input[name="mb_id"]',
+            ]
+            
+            found_selector = None
+            for selector in possible_selectors:
+                try:
+                    await self.page.wait_for_selector(selector, timeout=2000, state='visible')
+                    found_selector = selector
+                    print(f"[로그인] 사용자명 필드 찾음: {selector}")
+                    break
+                except:
+                    continue
+            
+            if not found_selector:
+                # 모든 선택자 실패 시 페이지 HTML 확인
+                print("[디버깅] 페이지의 모든 input 요소 확인 중...")
+                inputs = await self.page.query_selector_all('input')
+                print(f"[디버깅] 발견된 input 요소 수: {len(inputs)}")
+                for i, inp in enumerate(inputs[:5]):  # 처음 5개만
+                    try:
+                        input_info = await inp.evaluate('el => ({type: el.type, name: el.name, id: el.id, class: el.className})')
+                        print(f"[디버깅] Input {i+1}: {input_info}")
+                    except:
+                        pass
+                raise Exception(f"사용자명 입력 필드를 찾을 수 없습니다. 시도한 선택자: {possible_selectors}")
+            
+            username_selector = found_selector
             
             # 필드를 클릭해서 포커스 주기
             await self.page.click(username_selector)
@@ -810,12 +928,37 @@ class MacroBot:
             print(f"[로그인] 사용자명 입력 완료: {self.config['username']}")
             await self.random_delay(0.5, 1.0)
             
-            # 비밀번호 입력 필드
+            # 비밀번호 입력 필드 - 여러 선택자 시도
             password_selector = self.config.get('password_selector', 'input[name="password"]')
             print(f"[로그인] 비밀번호 입력 필드 찾는 중: {password_selector}")
             
-            # 요소가 로드될 때까지 대기
-            await self.page.wait_for_selector(password_selector, timeout=10000)
+            # 여러 선택자 시도
+            possible_password_selectors = [
+                password_selector,
+                'input[type="password"]',
+                'input[id*="pw"]',
+                'input[id*="pass"]',
+                'input[name*="pw"]',
+                'input[name*="pass"]',
+                'input.mb_password',
+                'input#mb_password',
+                'input[name="mb_password"]',
+            ]
+            
+            found_password_selector = None
+            for selector in possible_password_selectors:
+                try:
+                    await self.page.wait_for_selector(selector, timeout=2000, state='visible')
+                    found_password_selector = selector
+                    print(f"[로그인] 비밀번호 필드 찾음: {selector}")
+                    break
+                except:
+                    continue
+            
+            if not found_password_selector:
+                raise Exception(f"비밀번호 입력 필드를 찾을 수 없습니다. 시도한 선택자: {possible_password_selectors}")
+            
+            password_selector = found_password_selector
             
             # 필드를 클릭해서 포커스 주기
             await self.page.click(password_selector)
@@ -827,12 +970,39 @@ class MacroBot:
             print("[로그인] 비밀번호 입력 완료")
             await self.random_delay(0.5, 1.0)
             
-            # 로그인 버튼 클릭
+            # 로그인 버튼 클릭 - 여러 선택자 시도
             login_button_selector = self.config.get('login_button_selector', 'button[type="submit"]')
             print(f"[로그인] 로그인 버튼 찾는 중: {login_button_selector}")
             
-            await self.page.wait_for_selector(login_button_selector, timeout=10000)
-            await self.page.click(login_button_selector)
+            # 여러 선택자 시도
+            possible_button_selectors = [
+                login_button_selector,
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'button:has-text("로그인")',
+                'button:has-text("Login")',
+                'input[value*="로그인"]',
+                'input[value*="Login"]',
+                'button.btn_login',
+                'input.btn_login',
+                'button#login',
+                'input#login',
+            ]
+            
+            found_button_selector = None
+            for selector in possible_button_selectors:
+                try:
+                    await self.page.wait_for_selector(selector, timeout=2000, state='visible')
+                    found_button_selector = selector
+                    print(f"[로그인] 로그인 버튼 찾음: {selector}")
+                    break
+                except:
+                    continue
+            
+            if not found_button_selector:
+                raise Exception(f"로그인 버튼을 찾을 수 없습니다. 시도한 선택자: {possible_button_selectors}")
+            
+            await self.page.click(found_button_selector)
             print("[로그인] 로그인 버튼 클릭 완료")
             
             # 로그인 완료 대기
@@ -886,16 +1056,39 @@ class MacroBot:
             print(f"[오류] 게시글 링크 가져오기 실패: {e}")
             return []
     
-    async def get_post_date(self, post_url: str) -> datetime:
-        """게시글의 작성 시간 가져오기"""
+    async def get_post_date_from_current_page(self) -> datetime:
+        """현재 페이지에서 게시글 작성 시간 가져오기"""
         try:
-            # 게시글 페이지 접속
-            await self.page.goto(post_url, wait_until='networkidle')
-            await self.random_delay(1, 2)
-            
-            # 작성 시간을 찾는 여러 방법 시도
+            # 작성 시간을 찾는 여러 방법 시도 (oncapan.com 구조 반영)
             date_text = await self.page.evaluate("""
                 () => {
+                    // oncapan.com 작성 시간 선택자 (우선순위 1)
+                    const oncapanSelectors = [
+                        'strong.if_date',           // oncapan.com 작성일
+                        '.if_date',                 // oncapan.com 작성일 (변형)
+                        'strong[class*="date"]',    // 날짜 관련 strong 태그
+                    ];
+                    
+                    for (const sel of oncapanSelectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            // 텍스트 내용에서 날짜/시간 추출
+                            const text = el.textContent || el.innerText;
+                            if (text) {
+                                // "25-11-26 13:22" 형식 추출 (oncapan.com 형식)
+                                const dateMatch = text.match(/\\d{2}-\\d{2}-\\d{2}\\s+\\d{1,2}:\\d{2}/);
+                                if (dateMatch) {
+                                    return dateMatch[0];
+                                }
+                                // "25-11-26" 형식 (시간 없음)
+                                const dateMatch2 = text.match(/\\d{2}-\\d{2}-\\d{2}/);
+                                if (dateMatch2) {
+                                    return dateMatch2[0] + ' 00:00';  // 시간이 없으면 00:00으로 설정
+                                }
+                            }
+                        }
+                    }
+                    
                     // 일반적인 작성 시간 선택자들
                     const selectors = [
                         '.date',
@@ -924,10 +1117,141 @@ class MacroBot:
                     
                     // 모든 시간 관련 텍스트 찾기
                     const allText = document.body.innerText || document.body.textContent;
-                    const datePattern = /\\d{4}[.-/]\\d{1,2}[.-/]\\d{1,2}/;
+                    const datePattern = /\\d{2}-\\d{2}-\\d{2}\\s+\\d{1,2}:\\d{2}/;  // oncapan.com 형식 우선
                     const match = allText.match(datePattern);
                     if (match) {
                         return match[0];
+                    }
+                    
+                    // 다른 형식도 시도
+                    const datePattern2 = /\\d{4}[.-/]\\d{1,2}[.-/]\\d{1,2}/;
+                    const match2 = allText.match(datePattern2);
+                    if (match2) {
+                        return match2[0];
+                    }
+                    
+                    return null;
+                }
+            """)
+            
+            if not date_text:
+                return None
+            
+            # 날짜 파싱 (oncapan.com 형식 우선)
+            date_formats = [
+                '%y-%m-%d %H:%M',           # oncapan.com 형식: "25-11-26 13:22" (우선순위 1)
+                '%y-%m-%d %H:%M:%S',        # oncapan.com 형식: "25-11-26 13:22:00"
+                '%Y-%m-%d %H:%M:%S',        # 표준 형식: "2025-11-26 13:22:00"
+                '%Y-%m-%d %H:%M',           # 표준 형식: "2025-11-26 13:22"
+                '%Y.%m.%d %H:%M',           # 점 구분: "2025.11.26 13:22"
+                '%Y/%m/%d %H:%M',           # 슬래시 구분: "2025/11/26 13:22"
+                '%y-%m-%d',                 # oncapan.com 날짜만: "25-11-26"
+                '%Y-%m-%d',                 # 표준 날짜만: "2025-11-26"
+            ]
+            
+            for fmt in date_formats:
+                try:
+                    parsed_date = datetime.strptime(date_text, fmt)
+                    # 2자리 연도(YY)인 경우 2000년대로 변환
+                    if fmt.startswith('%y'):
+                        current_year = datetime.now().year
+                        parsed_year = parsed_date.year
+                        # 1900년대면 2000년대로 변환
+                        if parsed_year < 2000:
+                            parsed_date = parsed_date.replace(year=parsed_year + 100)
+                    return parsed_date
+                except:
+                    continue
+            
+            return None
+            
+        except Exception as e:
+            print(f"[경고] 현재 페이지에서 게시글 작성 시간을 가져오는 중 오류: {e}")
+            return None
+    
+    async def get_post_date(self, post_url: str = None) -> datetime:
+        """게시글의 작성 시간 가져오기 (현재 페이지 또는 지정된 URL)"""
+        try:
+            # post_url이 없으면 현재 페이지에서 가져오기
+            if not post_url:
+                return await self.get_post_date_from_current_page()
+            
+            # 게시글 페이지 접속
+            await self.page.goto(post_url, wait_until='networkidle')
+            await self.random_delay(1, 2)
+            
+            # 현재 페이지에서 작성 시간 가져오기
+            return await self.get_post_date_from_current_page()
+            
+            # 작성 시간을 찾는 여러 방법 시도 (oncapan.com 구조 반영)
+            date_text = await self.page.evaluate("""
+                () => {
+                    // oncapan.com 작성 시간 선택자 (우선순위 1)
+                    const oncapanSelectors = [
+                        'strong.if_date',           // oncapan.com 작성일
+                        '.if_date',                 // oncapan.com 작성일 (변형)
+                        'strong[class*="date"]',    // 날짜 관련 strong 태그
+                    ];
+                    
+                    for (const sel of oncapanSelectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            // 텍스트 내용에서 날짜/시간 추출
+                            const text = el.textContent || el.innerText;
+                            if (text) {
+                                // "25-11-26 13:22" 형식 추출 (oncapan.com 형식)
+                                const dateMatch = text.match(/\\d{2}-\\d{2}-\\d{2}\\s+\\d{1,2}:\\d{2}/);
+                                if (dateMatch) {
+                                    return dateMatch[0];
+                                }
+                                // "25-11-26" 형식 (시간 없음)
+                                const dateMatch2 = text.match(/\\d{2}-\\d{2}-\\d{2}/);
+                                if (dateMatch2) {
+                                    return dateMatch2[0] + ' 00:00';  // 시간이 없으면 00:00으로 설정
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 일반적인 작성 시간 선택자들
+                    const selectors = [
+                        '.date',
+                        '.datetime',
+                        '.write_date',
+                        '[class*="date"]',
+                        '[class*="time"]',
+                        'time',
+                        '[datetime]'
+                    ];
+                    
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            // datetime 속성 확인
+                            if (el.getAttribute('datetime')) {
+                                return el.getAttribute('datetime');
+                            }
+                            // 텍스트 내용 확인
+                            const text = el.textContent || el.innerText;
+                            if (text && text.trim()) {
+                                return text.trim();
+                            }
+                        }
+                    }
+                    
+                    // 모든 시간 관련 텍스트 찾기
+                    const allText = document.body.innerText || document.body.textContent;
+                    const datePattern = /\\d{2}-\\d{2}-\\d{2}\\s+\\d{1,2}:\\d{2}/;  // oncapan.com 형식 우선
+                    const match = allText.match(datePattern);
+                    if (match) {
+                        return match[0];
+                    }
+                    
+                    // 다른 형식도 시도
+                    const datePattern2 = /\\d{4}[.-/]\\d{1,2}[.-/]\\d{1,2}/;
+                    const match2 = allText.match(datePattern2);
+                    if (match2) {
+                        return match2[0];
                     }
                     
                     return null;
@@ -1075,36 +1399,150 @@ class MacroBot:
             # 방법 1: JavaScript로 모든 링크 가져오기 (가장 확실한 방법)
             all_urls = []
             
-            # JavaScript를 사용해서 페이지의 모든 링크 가져오기
-            links_data = await self.page.evaluate("""
+            # JavaScript를 사용해서 게시글 링크와 시간 정보를 함께 가져오기
+            posts_data = await self.page.evaluate("""
                 () => {
-                    const links = Array.from(document.querySelectorAll('a[href]'));
-                    return links.map(link => ({
-                        href: link.href,
-                        text: link.textContent.trim(),
-                        innerHTML: link.innerHTML
-                    }));
+                    const posts = [];
+                    // 게시글 목록 li 태그 찾기
+                    const listItems = document.querySelectorAll('.list_01 li, #bo_list li, li.bo_notice, li:not(.bo_notice)');
+                    
+                    for (const li of listItems) {
+                        // 게시글 링크 찾기
+                        const link = li.querySelector('a[href*="/bbs/free/"]');
+                        if (!link) continue;
+                        
+                        const href = link.href;
+                        // 게시글 ID 패턴 확인
+                        if (!/\\/bbs\\/free\\/\\d+/.test(href)) continue;
+                        
+                        // 시간 정보 찾기 (여러 패턴 시도)
+                        let timeText = null;
+                        
+                        // 방법 1: float: right 스타일의 div에서 찾기
+                        const timeDivs = li.querySelectorAll('div[style*="float: right"], div[style*="float:right"]');
+                        for (const div of timeDivs) {
+                            const text = div.textContent.trim();
+                            // 시간 형식 확인: "16:25" 또는 "11-21" 형식
+                            if (/\\d{1,2}:\\d{2}/.test(text) || /\\d{2}-\\d{2}/.test(text)) {
+                                timeText = text;
+                                break;
+                            }
+                        }
+                        
+                        // 방법 2: li 내부의 모든 텍스트에서 시간 패턴 찾기
+                        if (!timeText) {
+                            const liText = li.textContent || li.innerText;
+                            // "16:25" 형식 찾기
+                            const timeMatch = liText.match(/\\d{1,2}:\\d{2}/);
+                            if (timeMatch) {
+                                timeText = timeMatch[0];
+                            } else {
+                                // "11-21" 형식 찾기
+                                const dateMatch = liText.match(/\\d{2}-\\d{2}/);
+                                if (dateMatch) {
+                                    timeText = dateMatch[0];
+                                }
+                            }
+                        }
+                        
+                        posts.push({
+                            href: href.split('?')[0].split('#')[0],  // 쿼리 파라미터 제거
+                            timeText: timeText
+                        });
+                    }
+                    
+                    return posts;
                 }
             """)
             
-            print(f"[게시판] JavaScript로 {len(links_data)}개의 링크를 발견했습니다.")
+            print(f"[게시판] JavaScript로 {len(posts_data)}개의 게시글을 발견했습니다.")
             
-            # 게시글 링크 패턴: /bbs/free/숫자 형식
-            post_pattern = re.compile(r'/bbs/free/\d+')
-            
-            for link_data in links_data:
-                href = link_data.get('href', '')
+            # 게시글 링크와 시간 정보를 함께 저장
+            posts_with_time = []
+            for post_data in posts_data:
+                href = post_data.get('href', '')
+                time_text = post_data.get('timeText', '')
+                
                 if not href:
                     continue
                 
                 # 게시글 링크 패턴 확인
-                if post_pattern.search(href) or '/bbs/free/' in href:
-                    # 숫자로 끝나는 링크만 선택 (게시글 ID)
-                    if re.search(r'/bbs/free/\d+$', href) or re.search(r'/bbs/free/\d+\?', href) or re.search(r'/bbs/free/\d+#', href):
-                        # URL 정규화 (쿼리 파라미터 제거)
-                        clean_url = href.split('?')[0].split('#')[0]
-                        if clean_url not in processed_urls:
-                            all_urls.append(clean_url)
+                if re.search(r'/bbs/free/\d+', href):
+                    if href not in processed_urls:
+                        posts_with_time.append({
+                            'url': href,
+                            'time': time_text
+                        })
+            
+            # 시간 정보로 24시간 이내 게시글 필터링
+            now = datetime.now()
+            all_urls = []
+            
+            for post_info in posts_with_time:
+                url = post_info['url']
+                time_text = post_info['time']
+                
+                if not time_text:
+                    # 시간 정보가 없으면 일단 추가 (나중에 게시글 페이지에서 확인)
+                    all_urls.append(url)
+                    continue
+                
+                # 시간 파싱
+                is_within_24h = False
+                
+                try:
+                    # 형식 1: "16:25" (오늘 시간)
+                    if re.match(r'^\d{1,2}:\d{2}$', time_text):
+                        hour, minute = map(int, time_text.split(':'))
+                        post_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        
+                        # 오늘 시간이면 그대로 사용
+                        # 어제 시간일 수도 있으므로 24시간 범위 확인
+                        time_diff = now - post_time
+                        if time_diff.total_seconds() < 0:
+                            # 미래 시간이면 어제로 간주
+                            post_time = post_time - timedelta(days=1)
+                            time_diff = now - post_time
+                        
+                        is_within_24h = time_diff.total_seconds() <= 24 * 3600
+                    
+                    # 형식 2: "11-21" (월-일 형식)
+                    elif re.match(r'^\d{2}-\d{2}$', time_text):
+                        month, day = map(int, time_text.split('-'))
+                        current_year = now.year
+                        post_time = datetime(current_year, month, day, 0, 0, 0)
+                        
+                        # 올해가 아니면 작년으로 간주
+                        if post_time > now:
+                            post_time = datetime(current_year - 1, month, day, 0, 0, 0)
+                        
+                        time_diff = now - post_time
+                        is_within_24h = time_diff.total_seconds() <= 24 * 3600
+                    
+                    # 형식 3: "25-11-26 13:22" (oncapan.com 형식)
+                    elif re.match(r'^\d{2}-\d{2}-\d{2}\s+\d{1,2}:\d{2}', time_text):
+                        try:
+                            post_time = datetime.strptime(time_text, '%y-%m-%d %H:%M')
+                            # 2자리 연도 처리
+                            if post_time.year < 2000:
+                                post_time = post_time.replace(year=post_time.year + 100)
+                            time_diff = now - post_time
+                            is_within_24h = time_diff.total_seconds() <= 24 * 3600
+                        except:
+                            # 파싱 실패 시 추가 (나중에 확인)
+                            all_urls.append(url)
+                            continue
+                    
+                    if is_within_24h:
+                        all_urls.append(url)
+                        print(f"[필터링] 24시간 이내 게시글 발견: {url} (시간: {time_text})")
+                    else:
+                        print(f"[필터링] 24시간 초과 게시글 제외: {url} (시간: {time_text})")
+                
+                except Exception as e:
+                    # 시간 파싱 실패 시 일단 추가 (나중에 게시글 페이지에서 확인)
+                    print(f"[경고] 시간 파싱 실패 ({time_text}): {e}, 게시글 페이지에서 재확인 예정")
+                    all_urls.append(url)
             
             # 중복 제거 (순서 유지)
             all_urls = list(dict.fromkeys(all_urls))
@@ -1155,11 +1593,11 @@ class MacroBot:
                 # 현재 URL 확인
                 print(f"[디버깅] 현재 URL: {self.page.url}")
                 
-                # 발견된 링크 샘플 출력
-                sample_links = [link['href'] for link in links_data[:20] if link.get('href')]
-                print(f"[디버깅] 발견된 링크 샘플 (처음 10개):")
-                for i, link in enumerate(sample_links[:10], 1):
-                    print(f"  {i}. {link}")
+                # 발견된 게시글 샘플 출력
+                sample_posts = [post['href'] for post in posts_data[:20] if post.get('href')]
+                print(f"[디버깅] 발견된 게시글 샘플 (처음 10개):")
+                for i, post_url in enumerate(sample_posts[:10], 1):
+                    print(f"  {i}. {post_url}")
                 
                 # 스크린샷 저장
                 await self.page.screenshot(path='board_debug.png')
@@ -1193,18 +1631,13 @@ class MacroBot:
                     print(f"[중복방지] 이번 실행에서 이미 처리한 게시글 건너뛰기: {url}")
                     continue
                 
-                # 랜덤 모드에서는 시간 확인을 건너뛰고 모든 게시글을 후보에 추가 (성능 개선)
-                # 시간 확인은 write_comment 내에서 수행
-                if order == 'random':
-                    # 랜덤 모드: 시간 확인 없이 바로 추가 (나중에 write_comment에서 확인)
-                    valid_urls.append(url)
-                else:
-                    # 최신순/오래된순: 시간 확인 필요
-                    if await self.is_post_within_24h(url):
-                        valid_urls.append(url)
-                        # 첫 번째 유효한 게시글을 찾으면 중단 (최신순일 때)
-                        if order == 'latest':
-                            break
+                # 목록 페이지에서 이미 24시간 이내 게시글만 필터링했으므로
+                # 여기서는 중복 확인만 수행
+                valid_urls.append(url)
+                
+                # 최신순 모드에서는 첫 번째 유효한 게시글을 찾으면 중단
+                if order == 'latest':
+                    break
             
             if not valid_urls:
                 print("[게시판] 24시간 이내 게시글이 없습니다.")
@@ -1438,6 +1871,221 @@ class MacroBot:
             import traceback
             traceback.print_exc()
             return ""
+    
+    def analyze_post_emotion(self, post_content: str, post_title: str = "") -> dict:
+        """게시글 감정/상황 분석 (단순 휴리스틱)"""
+        combined_text = f"{post_title}\n{post_content}".lower()
+        
+        emotion_keywords = {
+            'joy': ['대박', '성공', '축하', '행복', '웃', '기쁘', '따았', '수익', '이겼', '복구'],
+            'sadness': ['망했', '후회', '슬프', '지쳤', '박살', '손실', '털렸', '아쉽', '0텅장', '텅장'],
+            'anger': ['빡치', '짜증', '화나', '열받', '미치겠', '싫다'],
+            'anxiety': ['불안', '무섭', '걱정', '떨리', '조심', '긴장'],
+            'complaint': ['신고', '먹튀', '문제', '크레임', '사기', '제보', '주의']
+        }
+        
+        question_keywords = ['?', '어디', '어떻게', '뭐', '무엇', '언제', '왜', '몇', '알려', '추천', '찾']
+        celebration_keywords = ['이벤트', '축하', '나눔', '뿌리', '선물', '페이백']
+        
+        scores = {k: 0 for k in emotion_keywords.keys()}
+        for emotion, keywords in emotion_keywords.items():
+            for word in keywords:
+                if word in combined_text:
+                    scores[emotion] += 1
+        
+        dominant_emotion = max(scores, key=scores.get) if scores else 'neutral'
+        intensity = min(1.0, scores.get(dominant_emotion, 0) / 3) if scores else 0.0
+        
+        is_question = any(word in combined_text for word in question_keywords)
+        is_celebration = any(word in combined_text for word in celebration_keywords)
+        is_complaint = scores.get('complaint', 0) > 0
+        
+        return {
+            'emotion': dominant_emotion if scores.get(dominant_emotion, 0) > 0 else 'neutral',
+            'intensity': round(intensity, 2),
+            'is_question': is_question,
+            'needs_answer': is_question,
+            'is_celebration': is_celebration or dominant_emotion == 'joy',
+            'is_complaint': is_complaint,
+            'raw_scores': scores
+        }
+    
+    def classify_post_type(self, post_content: str, post_title: str = "") -> str:
+        """게시글 유형 분류"""
+        combined_text = f"{post_title}\n{post_content}"
+        lower_text = combined_text.lower()
+        
+        if any(word in lower_text for word in ['?', '어디', '어떻게', '뭐', '무엇', '언제', '왜', '도와', '알려']):
+            return 'question'
+        if any(word in lower_text for word in ['후기', '정보', '추천', '정리', '공유']):
+            return 'information'
+        if any(word in lower_text for word in ['축하', '이벤트', '나눔', '페이백', '선물']):
+            return 'event'
+        if any(word in lower_text for word in ['힘들', '지쳤', '행복', '기쁘', '슬프', '화나', '눈물']):
+            return 'emotion'
+        return 'casual'
+    
+    def build_post_context_text(self, emotion_data: dict, post_type: str, temporal_context: dict = None, max_length: int = 10, community_terms: list = None) -> str:
+        """프롬프트에 사용할 게시글 감정/유형 정보 생성"""
+        if not emotion_data:
+            return ""
+        
+        emotion_label_map = {
+            'joy': '기쁨/축하',
+            'sadness': '슬픔/후회',
+            'anger': '분노/불만',
+            'anxiety': '불안/긴장',
+            'complaint': '신고/제보',
+            'neutral': '중립'
+        }
+        emotion_label = emotion_label_map.get(emotion_data.get('emotion', 'neutral'), '중립')
+        
+        context_lines = ["\n\n🧠 게시글 감정/상황 분석:"]
+        context_lines.append(f"- 감정 상태: {emotion_label} (강도 {int(emotion_data.get('intensity', 0)*100)}%)")
+        context_lines.append(f"- 게시글 유형: {post_type}")
+        
+        if emotion_data.get('is_question'):
+            context_lines.append("- 게시글이 질문을 포함하므로, 가능한 경우 짧게 답변하거나 공감하세요")
+        if emotion_data.get('is_celebration'):
+            context_lines.append("- 축하/행복한 분위기이므로, 이를 함께 기뻐하는 톤이 자연스럽습니다")
+        if emotion_data.get('is_complaint'):
+            context_lines.append("- 불만/신고 성격이 있으므로 진지하게 공감하거나 주의 메시지를 덧붙이세요")
+        
+        if temporal_context:
+            time_label = temporal_context.get('time_greeting')
+            if time_label:
+                context_lines.append(f"- 현재 작성 시간: {time_label} (시간대 고려)")
+            if temporal_context.get('is_weekend'):
+                context_lines.append("- 주말 분위기이므로 가볍고 편한 톤이 자연스럽습니다")
+        
+        if community_terms:
+            context_lines.append(f"- 커뮤니티 특수 용어: {', '.join(community_terms)} (자연스럽게 사용할 수 있으면 활용)")
+        
+        context_lines.append(f"- 댓글 길이는 최대 {max_length}글자 이내로 유지하세요 (기본 10글자)")
+        context_lines.append("- 감정선과 게시글 톤을 자연스럽게 이어가세요")
+        
+        return "\n".join(context_lines) + "\n"
+    
+    def get_temporal_context(self, post_date: datetime = None) -> dict:
+        """게시글 작성 시간 기반 맥락"""
+        if not post_date:
+            return {}
+        
+        hour = post_date.hour
+        if 0 <= hour < 5:
+            time_greeting = '심야 시간'
+        elif 5 <= hour < 12:
+            time_greeting = '아침 시간'
+        elif 12 <= hour < 18:
+            time_greeting = '오후 시간'
+        else:
+            time_greeting = '저녁 시간'
+        
+        return {
+            'hour': hour,
+            'day_of_week': post_date.weekday(),
+            'is_night': hour >= 22 or hour < 6,
+            'is_weekend': post_date.weekday() >= 5,
+            'time_greeting': time_greeting
+        }
+    
+    def get_optimal_comment_length(self, existing_comments: list, base_limit: int = 10) -> int:
+        """기존 댓글 길이에 따라 최대 길이 조정 (최대 15자)"""
+        if not existing_comments:
+            return base_limit
+        
+        valid_comments = [len(c.strip()) for c in existing_comments if c and len(c.strip()) >= 2]
+        if not valid_comments:
+            return base_limit
+        
+        avg_length = sum(valid_comments) / len(valid_comments)
+        if avg_length <= base_limit:
+            return base_limit
+        
+        adjusted = min(15, int(round(avg_length * 1.1)))
+        return max(base_limit, adjusted)
+    
+    def analyze_comment_flow(self, existing_comments: list) -> dict:
+        """댓글 흐름/중복도 분석"""
+        from difflib import SequenceMatcher
+        
+        recent = [c for c in (existing_comments or []) if c and len(c.strip()) >= 2][-5:]
+        if not recent:
+            return {
+                'needs_diversity': False,
+                'average_similarity': 0.0,
+                'recent_theme': ''
+            }
+        
+        similarities = []
+        for i in range(len(recent) - 1):
+            a, b = recent[i], recent[i + 1]
+            ratio = SequenceMatcher(None, a, b).ratio()
+            similarities.append(ratio)
+        
+        avg_similarity = sum(similarities) / len(similarities) if similarities else 0.0
+        
+        return {
+            'needs_diversity': avg_similarity >= 0.7,
+            'average_similarity': round(avg_similarity, 2),
+            'recent_theme': 'repetitive' if avg_similarity >= 0.7 else 'varied'
+        }
+    
+    def is_comment_too_similar(self, comment: str, existing_comments: list, threshold: float = 0.75) -> bool:
+        """댓글이 기존 댓글과 지나치게 유사한지 확인"""
+        if not comment or not existing_comments:
+            return False
+        
+        from difflib import SequenceMatcher
+        recent = [c for c in existing_comments if c and len(c.strip()) >= 2][-8:]
+        for prev in recent:
+            ratio = SequenceMatcher(None, comment, prev).ratio()
+            if ratio >= threshold:
+                return True
+        return False
+    
+    def extract_community_terms(self, text: str) -> list:
+        """도박 커뮤니티 특수 용어 감지"""
+        if not text:
+            return []
+        
+        terms = [
+            '노돌', '노발', '댓노', '포거래', '텅장', '역배', '정배', '환전', '먹튀', '페이백',
+            '야식쿱', '깡', '픽', '슬롯', '바카라', '포바', '부주력', '몰빵', '똥배', '정형'
+        ]
+        found = []
+        lower_text = text.lower()
+        for term in terms:
+            if term.lower() in lower_text:
+                found.append(term)
+        return found[:5]
+    
+    def log_comment_feedback(self, post_title: str, post_content: str, existing_comments: list, comment_text: str):
+        """작성된 댓글을 학습용 피드백 로그로 저장"""
+        try:
+            log_entry = {
+                'timestamp': datetime.now().isoformat(),
+                '제목': post_title or '',
+                '본문': (post_content or '')[:500],
+                '기존_댓글': existing_comments[:5] if existing_comments else [],
+                '작성_댓글': comment_text
+            }
+            log_file = 'ai_feedback_log.json'
+            data = []
+            if os.path.exists(log_file):
+                with open(log_file, 'r', encoding='utf-8') as f:
+                    try:
+                        data = json.load(f)
+                    except json.JSONDecodeError:
+                        data = []
+            data.append(log_entry)
+            # 최근 200개만 유지
+            data = data[-200:]
+            with open(log_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print("[학습] 댓글 피드백 로그에 기록했습니다.")
+        except Exception as e:
+            print(f"[경고] 피드백 로그 저장 실패: {e}")
     
     def analyze_comment_style(self, existing_comments: list) -> dict:
         """기존 댓글들의 말투 스타일 분석 (더 정확하게)"""
@@ -1737,7 +2385,7 @@ class MacroBot:
                 print(f"[디버깅] 발견된 버튼들: {page_structure.get('buttons', [])}")
                 print("[디버깅] 위 정보를 개발자에게 알려주시면 댓글 위치를 정확히 찾을 수 있습니다.")
             
-            return comments[:10]  # 최대 10개만
+            return comments[:20]  # 최대 20개까지 사용
             
         except Exception as e:
             print(f"[경고] 기존 댓글을 가져오는 중 오류: {e}")
@@ -1870,6 +2518,15 @@ class MacroBot:
         print(f"[AI] 게시글 본문 분석 중... (길이: {len(post_content)}자)")
         print(f"[AI] 본문 내용: {post_content[:100]}...")
         
+        # 게시글 감정/유형 분석
+        post_emotion = self.analyze_post_emotion(post_content, post_title)
+        post_type = self.classify_post_type(post_content, post_title)
+        post_date = getattr(self, '_last_post_date', None)
+        temporal_context = self.get_temporal_context(post_date)
+        max_comment_length = self.get_optimal_comment_length(existing_comments)
+        community_terms = self.extract_community_terms(f"{post_title or ''}\n{post_content or ''}")
+        post_context_text = self.build_post_context_text(post_emotion, post_type, temporal_context, max_comment_length, community_terms)
+        
         if existing_comments:
             print(f"[AI] 기존 댓글 {len(existing_comments)}개 확인: {existing_comments[:3]}...")
         
@@ -1888,7 +2545,9 @@ class MacroBot:
                 comments_text += "2. 위 댓글들의 스타일과 길이를 분석\n"
                 comments_text += "3. 위 댓글들의 감정선과 톤을 파악\n"
                 comments_text += "4. 위 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요\n"
-                comments_text += "5. 본문보다 위 기존 댓글 스타일에 더 중점을 두세요\n\n"
+                comments_text += "5. 본문보다 위 기존 댓글 스타일에 더 중점을 두세요\n"
+                comments_text += "6. ✅ 가장 중요: 위 댓글들이 말하는 핵심 내용/키워드를 그대로 유지하고, 말투만 자연스럽게 바꿔 표현하세요.\n"
+                comments_text += "7. 새로운 주장이나 정보를 추가하지 말고, 기존 댓글과 같은 메시지를 짧게 변형하세요.\n\n"
                 
                 # 분석된 스타일 정보 추가
                 comments_text += f"📊 기존 댓글 스타일 분석 결과:\n"
@@ -1906,7 +2565,12 @@ class MacroBot:
                     comments_text += f"- ⚠️ 중요: 위 기존 댓글들이 특수 기호를 사용한다면, 당신도 비슷한 스타일로 작성하세요.\n"
                 else:
                     comments_text += f"- 특수 기호 사용: 거의 사용하지 않음 ({style['emoji_usage_rate']*100:.0f}%)\n"
-                    comments_text += f"- ⚠️ 중요: 위 기존 댓글들이 특수 기호를 사용하지 않으므로, 당신도 특수 기호 없이 작성하세요.\n"
+                comments_text += f"- ⚠️ 중요: 위 기존 댓글들이 특수 기호를 사용하지 않으므로, 당신도 특수 기호 없이 작성하세요.\n"
+                
+                comment_flow = self.analyze_comment_flow(existing_comments)
+                if comment_flow.get('needs_diversity'):
+                    comments_text += "- 최근 댓글들이 서로 비슷하니 다른 표현이나 관점을 사용하세요.\n"
+                    comments_text += "- 같은 단어/어미 반복을 피하고 새로운 단어를 사용하세요.\n"
             else:
                 comments_text = "\n\n현재 댓글 흐름: (댓글 없음)"
             
@@ -2239,10 +2903,27 @@ class MacroBot:
             
             # 프롬프트 생성 (도박 용어 사전 포함)
             # 기존 댓글을 우선적으로 강조
-            comments_priority_text = "\n\n⭐⭐⭐ 중요: 기존 댓글들을 우선적으로 분석하고, 기존 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요. 본문보다 기존 댓글 스타일에 더 중점을 두세요.\n" if existing_comments and len(existing_comments) > 0 else ""
+            comments_priority_text = "\n\n⭐⭐⭐ 중요: 기존 댓글들을 우선적으로 분석하고, 기존 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요. 본문보다 기존 댓글 스타일에 더 중점을 두세요. 기존 댓글의 의미와 핵심 단어를 유지하고 말투만 자연스럽게 바꾸세요.\n" if existing_comments and len(existing_comments) > 0 else ""
             
             title_section = f"\n게시글 제목:\n{post_title if post_title else '(제목 없음)'}\n" if post_title else ""
-            prompt = f"""{base_prompt_section}{gambling_terms_text}{comments_priority_text}{keywords_text}{question_guide}
+            context_block = post_context_text if post_context_text else ""
+            length_instruction = f"\n\n📏 댓글 길이 가이드: 기본 10글자, 최대 {max_comment_length}글자 이내로 작성하세요.\n"
+            
+            # 댓글을 본문보다 먼저 배치하여 우선 확인하도록 변경
+            if existing_comments and len(existing_comments) > 0:
+                # 댓글이 있으면 댓글을 먼저, 본문을 나중에 배치
+                prompt = f"""{base_prompt_section}{gambling_terms_text}{context_block}{length_instruction}{comments_priority_text}
+
+⭐⭐⭐ 가장 먼저 확인: 기존 댓글들 (본문보다 우선!)
+{comments_text}
+
+{title_section}게시글 본문 (참고용):
+{post_content[:500]}{keywords_text}{question_guide}{few_shot_text}{bad_examples_text}
+
+댓글:"""
+            else:
+                # 댓글이 없으면 기존 순서 유지
+                prompt = f"""{base_prompt_section}{gambling_terms_text}{context_block}{length_instruction}{comments_priority_text}{keywords_text}{question_guide}
 
 {title_section}게시글 본문:
 {post_content[:500]}{comments_text}{few_shot_text}{bad_examples_text}
@@ -2256,12 +2937,25 @@ class MacroBot:
                     'Content-Type': 'application/json'
                 }
                 
+                system_prompt = (
+                    "당신은 도박 관련 사이트의 자유게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하지만 자연스러운 댓글을 작성하는 도우미입니다. "
+                    "자유게시판이므로 도박 관련 얘기뿐만 아니라 일상 수다도 올라올 수 있습니다. 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 댓글을 작성해야 합니다. "
+                    "가장 중요한 것은: 1) 기존 댓글들의 스타일을 우선적으로 분석하고 그에 맞춰 작성하세요. 기존 댓글들이 특수 기호(~, !, ㅠ 등)를 사용한다면 당신도 사용하고, 사용하지 않는다면 사용하지 마세요. "
+                    "2) 본문의 말투를 정확히 분석하는 것입니다 (본문이 \"~할까요?\" 같은 존댓말이면 댓글도 \"~요\", \"~네요\" 같은 높임말 사용, 본문이 반말이면 댓글도 반말 사용). "
+                    "3) 본문의 핵심 키워드를 추출하여 댓글에 자연스럽게 활용하세요 (예: 본문에 \"야식\"이 있으면 \"야식 좋지요\"처럼 키워드를 포함). "
+                    "4) 마침표(.)는 절대 사용하지 마세요. 5) \"용\" 어미는 절대 사용하지 마세요 (예: \"힘내용\" ❌ → \"힘내요\" ✅). "
+                    "6) 질문형 게시글에서 답을 모르면 댓글을 작성하지 마세요. 7) 기존 댓글들의 말투와 스타일을 분석하여 최대한 비슷하게 작성하세요. "
+                    f"8) 반드시 {max_comment_length}글자 이내로 완성하고, 맞춤법을 정확하게 사용하세요. "
+                    "9) 절대 \"감사합니다\", \"감사해요\", \"감사\" 같은 단어를 사용하지 말고, 형식적인 댓글을 사용하지 마세요. "
+                    "10) 기존 댓글들이 말하는 핵심 내용과 키워드를 벗어나지 말고, 말투만 자연스럽게 바꿔 표현하세요. 새로운 정보나 다른 주제를 추가하지 마세요."
+                )
+                
                 data = {
                     'model': 'gpt-4o',
                     'messages': [
                         {
                             'role': 'system',
-                            'content': '당신은 도박 관련 사이트의 자유게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하지만 자연스러운 댓글을 작성하는 도우미입니다. 자유게시판이므로 도박 관련 얘기뿐만 아니라 일상 수다도 올라올 수 있습니다. 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 댓글을 작성해야 합니다. 가장 중요한 것은: 1) 기존 댓글들의 스타일을 우선적으로 분석하고 그에 맞춰 작성하세요. 기존 댓글들이 특수 기호(~, !, ㅠ 등)를 사용한다면 당신도 사용하고, 사용하지 않는다면 사용하지 마세요. 2) 본문의 말투를 정확히 분석하는 것입니다 (본문이 "~할까요?" 같은 존댓말이면 댓글도 "~요", "~네요" 같은 높임말 사용, 본문이 반말이면 댓글도 반말 사용). 3) 본문의 핵심 키워드를 추출하여 댓글에 자연스럽게 활용하세요 (예: 본문에 "야식"이 있으면 "야식 좋지요"처럼 키워드를 포함). 4) 마침표(.)는 절대 사용하지 마세요. 5) "용" 어미는 절대 사용하지 마세요 (예: "힘내용" ❌ → "힘내요" ✅). 6) 질문형 게시글에서 답을 모르면 댓글을 작성하지 마세요. 7) 기존 댓글들의 말투와 스타일을 분석하여 최대한 비슷하게 작성하세요. 8) 반드시 10글자 이내로 완성하고, 맞춤법을 정확하게 사용하세요. 9) 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 말고, 형식적인 댓글을 사용하지 마세요.'
+                            'content': system_prompt
                         },
                         {
                             'role': 'user',
@@ -2269,7 +2963,7 @@ class MacroBot:
                         }
                     ],
                     'max_tokens': 80,  # 10자 이내 댓글을 위해 충분한 토큰 할당 (한국어는 토큰 효율이 낮음)
-                    'temperature': 0.7  # 일관성 있는 댓글 생성을 위해 낮춤
+                    'temperature': 0.9  # 다양성 증가 (0.7 -> 0.9로 통일)
                 }
                 
                 async with session.post(
@@ -2329,10 +3023,10 @@ class MacroBot:
                                 # 다시 시도 (한 번만)
                                 return await self.generate_ai_comment_retry(post_content, existing_comments, retry_count=1)
                         
-                        # 10글자 초과 시 재시도 (잘라내지 말고 처음부터 10자 이내로 작성하도록)
-                        if len(comment) > 10:
-                            print(f"[경고] 댓글이 10글자를 초과했습니다 ({len(comment)}자): {comment}")
-                            print(f"[경고] 10자 이내로 재생성합니다...")
+                        # 길이 초과 시 재시도 (잘라내지 말고 처음부터 제한 길이 이내로 작성하도록)
+                        if len(comment) > max_comment_length:
+                            print(f"[경고] 댓글이 최대 길이({max_comment_length}자)를 초과했습니다 ({len(comment)}자): {comment}")
+                            print(f"[경고] 길이 제한에 맞춰 재생성합니다...")
                             return await self.generate_ai_comment_retry(post_content, existing_comments, 1, post_title=getattr(self, '_last_post_title', None))
                         
                         # ~입니다 체 제거 및 ~요 체로 변경
@@ -2346,6 +3040,20 @@ class MacroBot:
                             print(f"[경고] ⚠️⚠️ 최종 필터링: '감사' 단어가 포함된 댓글 감지: {comment}")
                             print(f"[경고] AI 재시도 실패, 기존 댓글 스타일로 댓글 생성...")
                             return self.generate_style_matched_comment(existing_comments or [], post_content)
+                        
+                        if existing_comments and self.is_comment_too_similar(comment, existing_comments):
+                            print(f"[경고] 최근 댓글과 유사도가 높아 재생성 시도: {comment}")
+                            regenerated = await self.generate_ai_comment_retry(
+                                post_content,
+                                existing_comments,
+                                retry_count=1,
+                                post_title=post_title
+                            )
+                            if regenerated and not self.is_comment_too_similar(regenerated, existing_comments):
+                                comment = regenerated
+                            else:
+                                print("[경고] 재생성 댓글도 비슷하거나 실패하여 기본 스타일 댓글로 전환합니다.")
+                                return self.generate_style_matched_comment(existing_comments or [], post_content)
                         
                         print(f"[AI] 댓글 생성 완료: {comment}")
                         return comment
@@ -2412,12 +3120,12 @@ class MacroBot:
                 numbered_comments = "\n".join(
                     [f"{idx + 1}. {c}" for idx, c in enumerate(existing_comments[:8])]
                 )
-                comments_text = f"\n\n⭐⭐⭐ 가장 중요: 현재 댓글 흐름 (최근 {min(len(existing_comments), 8)}개):\n{numbered_comments}\n\n위 댓글들을 우선적으로 분석하고, 위 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요. 본문보다 기존 댓글 스타일에 더 중점을 두세요."
+                comments_text = f"\n\n⭐⭐⭐ 가장 중요: 현재 댓글 흐름 (최근 {min(len(existing_comments), 8)}개):\n{numbered_comments}\n\n위 댓글들을 우선적으로 분석하고, 위 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요. 본문보다 기존 댓글 스타일에 더 중점을 두세요.\n- 위 댓글들이 사용하는 핵심 단어와 감정을 그대로 유지하고, 말투만 자연스럽게 바꿔 작성하세요.\n- 새로운 정보나 다른 주제를 절대 추가하지 마세요.\n"
             else:
                 comments_text = "\n\n현재 댓글 흐름: (댓글 없음)"
             
             # 기존 댓글 우선 강조 텍스트
-            comments_priority_text = "\n\n⭐⭐⭐ 가장 중요: 기존 댓글들을 우선적으로 분석하고, 기존 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요. 본문보다 기존 댓글 스타일에 더 중점을 두세요.\n" if existing_comments and len(existing_comments) > 0 else ""
+            comments_priority_text = "\n\n⭐⭐⭐ 가장 중요: 기존 댓글들을 우선적으로 분석하고, 기존 댓글들과 최대한 비슷한 스타일로 댓글을 작성하세요. 본문보다 기존 댓글 스타일에 더 중점을 두세요. 기존 댓글의 핵심 내용과 키워드를 유지하고 말투만 자연스럽게 바꾸세요.\n" if existing_comments and len(existing_comments) > 0 else ""
             
             # 본문에서 핵심 키워드 추출
             keywords = self.extract_keywords_from_post(post_content, post_title)
@@ -2431,6 +3139,15 @@ class MacroBot:
             if is_question:
                 question_guide = "\n\n⚠️ 질문형 게시글입니다:\n- 질문에 대한 답을 모르면 댓글을 작성하지 마세요.\n- 답을 알고 있거나 공감할 수 있는 내용만 댓글로 작성하세요.\n"
             
+            post_emotion = self.analyze_post_emotion(post_content, post_title or "")
+            post_type = self.classify_post_type(post_content, post_title or "")
+            post_date = getattr(self, '_last_post_date', None)
+            temporal_context = self.get_temporal_context(post_date)
+            max_comment_length = self.get_optimal_comment_length(existing_comments)
+            community_terms = self.extract_community_terms(f"{post_title or ''}\n{post_content or ''}")
+            context_block = self.build_post_context_text(post_emotion, post_type, temporal_context, max_comment_length, community_terms)
+            length_instruction = f"\n- 현재 최대 길이: {max_comment_length}글자 (기본 10글자)\n"
+            
             # 더 강력한 프롬프트 (통일된 버전)
             prompt = f"""다음 게시글 본문을 읽고, 작성자의 감정에 공감하는 댓글을 작성해주세요.
 
@@ -2439,20 +3156,23 @@ class MacroBot:
 - 게시글 주제가 도박이든 일상이든 상관없이, 본문 내용과 기존 댓글 흐름에 맞춰 작성해야 합니다
 - 댓글은 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 작성해야 합니다
 
-🎯 핵심 원칙 (우선순위 순):
-1. ⭐⭐⭐ 가장 중요: 기존 댓글들을 우선적으로 분석하세요!
+🎯 핵심 원칙 (우선순위 순 - 반드시 이 순서로 진행):
+1. ⭐⭐⭐ 가장 중요: 기존 댓글들을 먼저 분석하세요! (본문보다 우선!)
    - 기존 댓글들의 말투, 스타일, 길이, 감정선을 정확히 파악
    - 기존 댓글들과 최대한 비슷한 스타일로 댓글 작성
-   - 본문보다 기존 댓글 스타일에 더 중점을 두세요
-2. 말투 매칭: 기존 댓글들의 말투 패턴을 우선 확인
+   - 본문은 나중에 참고용으로만 사용
+2. ⭐⭐ 두 번째: 기존 댓글 스타일을 따라 댓글 설계
+   - 기존 댓글들의 말투 패턴을 우선 확인
    - 기존 댓글이 대부분 존댓말이면 존댓말로, 반말이면 반말로 작성
-   - 본문 말투는 참고용으로만 사용
-3. 본문의 핵심 키워드를 댓글에 활용 (선택적): 본문에 나온 주요 단어를 자연스럽게 포함
+   - 본문 말투는 무시하고 기존 댓글 말투를 따라야 함
+3. 본문은 참고용으로만 사용 (기존 댓글 스타일 유지하면서)
+   - 본문의 핵심 키워드만 선택적으로 활용
+   - 본문 말투는 기존 댓글 말투와 다를 수 있으므로 무시
 4. 특수 기호 사용: 기존 댓글들이 특수 기호(~, !, ㅠ 등)를 사용한다면 그에 맞춰 사용하고, 사용하지 않는다면 사용하지 마세요
 5. 마침표(.) 절대 사용 금지
 6. "용" 어미 절대 사용 금지
 7. 질문형 게시글: 답을 모르면 댓글 작성하지 않음
-8. 반드시 10글자 이내로 완성
+8. 반드시 {max_comment_length}글자 이내로 완성 (기본 10글자, 현재 한도 {max_comment_length}글자)
 
 절대 사용하지 말 것 (금지):
 - "좋은 글 감사합니다"
@@ -2478,16 +3198,28 @@ class MacroBot:
 - 맞춤법을 반드시 정확하게 사용
 - 게시판이 도박 관련이라는 맥락을 고려
 - 게시글 내용과 기존 댓글 흐름 모두에 자연스럽게 이어지는 댓글
-- 반드시 10글자 이내로 완성해야 함 (10글자를 넘기면 안 됨)
+- 댓글 길이는 {max_comment_length}글자 이내로 작성 (기본 10글자)
 - ~요 체나 반말체를 적절히 섞어서 사용 (너무 반말만 쓰지 않기)
 
 추론 절차 (반드시 내부적으로 거친 뒤 마지막에 댓글 한 줄만 출력):
-1. 본문에서 핵심 키워드와 감정을 2개 이상 파악하고 친구에게 말하듯 정리합니다. (생각만, 출력 금지)
-2. 기존 댓글 말투/이모티콘/길이를 분석해 어떤 어미·감정선이 자연스러운지 결정합니다. (생각만, 출력 금지)
-3. 위 정보를 합쳐 10글자 이내 댓글을 설계합니다. 기존 댓글들이 특수 기호를 사용한다면 그에 맞춰 사용하세요.
+1. ⭐⭐⭐ 가장 먼저: 기존 댓글들을 정확히 분석합니다 (본문보다 우선!)
+   - 기존 댓글들의 말투 패턴을 파악합니다 (존댓말/반말, 어미 패턴)
+   - 기존 댓글들의 스타일과 길이를 분석합니다
+   - 기존 댓글들의 감정선과 톤을 파악합니다
+   - 기존 댓글들이 어떤 패턴으로 작성되었는지 정확히 이해합니다. (생각만, 출력 금지)
+2. ⭐⭐ 두 번째: 기존 댓글 스타일을 따라 댓글을 설계합니다
+   - 기존 댓글들의 말투 패턴을 따라 작성합니다
+   - 기존 댓글들의 길이와 스타일을 따라 작성합니다
+   - 기존 댓글들의 감정선을 자연스럽게 이어갑니다. (생각만, 출력 금지)
+3. 본문은 참고용으로만 사용합니다 (기존 댓글 스타일을 유지하면서)
+   - 본문의 핵심 키워드만 참고합니다 (말투는 기존 댓글 말투를 우선)
+   - 기존 댓글 말투와 본문 말투가 다를 수 있으므로, 기존 댓글 말투를 우선합니다. (생각만, 출력 금지)
+4. 위 정보를 합쳐 {max_comment_length}글자 이내 댓글을 설계합니다. 기존 댓글들이 특수 기호를 사용한다면 그에 맞춰 사용하세요.
 최종 출력은 댓글 한 줄만 해야 하며, 다른 문장은 포함하면 안 됩니다.
 
-{comments_priority_text}게시글 본문:
+{comments_priority_text}{context_block}{length_instruction}
+
+게시글 본문:
 {post_content[:500]}{comments_text}
 
 댓글:"""
@@ -2498,12 +3230,25 @@ class MacroBot:
                     'Content-Type': 'application/json'
                 }
                 
+                system_prompt_retry = (
+                    "당신은 도박 관련 사이트의 자유게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하지만 자연스러운 댓글을 작성하는 도우미입니다. "
+                    "자유게시판이므로 도박 관련 얘기뿐만 아니라 일상 수다도 올라올 수 있습니다. 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 댓글을 작성해야 합니다. "
+                    "가장 중요한 것은: 1) 기존 댓글들의 스타일을 우선적으로 분석하고 그에 맞춰 작성하세요. 기존 댓글들이 특수 기호(~, !, ㅠ 등)를 사용한다면 당신도 사용하고, 사용하지 않는다면 사용하지 마세요. "
+                    "2) 본문의 말투를 정확히 분석하는 것입니다 (본문이 \"~할까요?\" 같은 존댓말이면 댓글도 \"~요\", \"~네요\" 같은 높임말 사용, 본문이 반말이면 댓글도 반말 사용). "
+                    "3) 본문의 핵심 키워드를 추출하여 댓글에 자연스럽게 활용하세요 (예: 본문에 \"야식\"이 있으면 \"야식 좋지요\"처럼 키워드를 포함). "
+                    "4) 마침표(.)는 절대 사용하지 마세요. 5) \"용\" 어미는 절대 사용하지 마세요 (예: \"힘내용\" ❌ → \"힘내요\" ✅). "
+                    "6) 질문형 게시글에서 답을 모르면 댓글을 작성하지 마세요. 7) 기존 댓글들의 말투와 스타일을 분석하여 최대한 비슷하게 작성하세요. "
+                    f"8) 반드시 {max_comment_length}글자 이내로 완성하고, 맞춤법을 정확하게 사용하세요. "
+                    "9) 절대 \"감사합니다\", \"감사해요\", \"감사\" 같은 단어를 사용하지 말고, 형식적인 댓글을 사용하지 마세요. "
+                    "10) 기존 댓글들이 말하는 핵심 내용과 키워드를 벗어나지 말고, 말투만 자연스럽게 바꿔 표현하세요. 새로운 정보나 다른 주제를 추가하지 마세요."
+                )
+                
                 data = {
                     'model': 'gpt-4o',
                     'messages': [
                         {
                             'role': 'system',
-                            'content': '당신은 도박 관련 사이트의 자유게시판에서 게시글 작성자의 톤과 내용에 맞춰 친근하지만 자연스러운 댓글을 작성하는 도우미입니다. 자유게시판이므로 도박 관련 얘기뿐만 아니라 일상 수다도 올라올 수 있습니다. 페이스북, 네이버 등 일반 커뮤니티와 똑같은 스타일로 댓글을 작성해야 합니다. 가장 중요한 것은: 1) 기존 댓글들의 스타일을 우선적으로 분석하고 그에 맞춰 작성하세요. 기존 댓글들이 특수 기호(~, !, ㅠ 등)를 사용한다면 당신도 사용하고, 사용하지 않는다면 사용하지 마세요. 2) 본문의 말투를 정확히 분석하는 것입니다 (본문이 "~할까요?" 같은 존댓말이면 댓글도 "~요", "~네요" 같은 높임말 사용, 본문이 반말이면 댓글도 반말 사용). 3) 본문의 핵심 키워드를 추출하여 댓글에 자연스럽게 활용하세요 (예: 본문에 "야식"이 있으면 "야식 좋지요"처럼 키워드를 포함). 4) 마침표(.)는 절대 사용하지 마세요. 5) "용" 어미는 절대 사용하지 마세요 (예: "힘내용" ❌ → "힘내요" ✅). 6) 질문형 게시글에서 답을 모르면 댓글을 작성하지 마세요. 7) 기존 댓글들의 말투와 스타일을 분석하여 최대한 비슷하게 작성하세요. 8) 반드시 10글자 이내로 완성하고, 맞춤법을 정확하게 사용하세요. 9) 절대 "감사합니다", "감사해요", "감사" 같은 단어를 사용하지 말고, 형식적인 댓글을 사용하지 마세요.'
+                            'content': system_prompt_retry
                         },
                         {
                             'role': 'user',
@@ -2511,7 +3256,7 @@ class MacroBot:
                         }
                     ],
                     'max_tokens': 80,  # 10자 이내 댓글을 위해 충분한 토큰 할당 (한국어는 토큰 효율이 낮음)
-                    'temperature': 0.7  # 일관성 있는 댓글 생성을 위해 낮춤
+                    'temperature': 0.9  # 다양성 증가 (0.7 -> 0.9로 통일)
                 }
                 
                 async with session.post(
@@ -2528,9 +3273,9 @@ class MacroBot:
                         # 중복 어미 및 불필요한 문자 제거
                         comment = self.clean_comment(comment)
                         
-                        # 10글자 초과 시 재시도
-                        if len(comment) > 10:
-                            print(f"[경고] 재시도 댓글이 10글자를 초과했습니다 ({len(comment)}자): {comment}")
+                        # 길이 초과 시 기존 스타일 사용
+                        if len(comment) > max_comment_length:
+                            print(f"[경고] 재시도 댓글이 최대 길이({max_comment_length}자)를 초과했습니다 ({len(comment)}자): {comment}")
                             print(f"[경고] 기존 댓글 스타일로 댓글 생성...")
                             return self.generate_style_matched_comment(existing_comments or [], post_content)
                         
@@ -2554,26 +3299,51 @@ class MacroBot:
         print(f"[댓글] 현재 페이지 URL: {self.page.url}")
         print(f"[댓글] ========================================")
         try:
-            # 페이지가 닫혔는지 확인
-            if not self.page or self.page.is_closed():
+            # 페이지가 닫혔는지 확인 (Frame과 Page 구분)
+            page_closed = False
+            if not self.page:
+                page_closed = True
+            else:
+                try:
+                    # Page 객체인 경우
+                    if hasattr(self.page, 'is_closed'):
+                        page_closed = self.page.is_closed()
+                    # Frame 객체인 경우 (is_closed 메서드 없음) - main_page 확인
+                    elif self.main_page and hasattr(self.main_page, 'is_closed'):
+                        page_closed = self.main_page.is_closed()
+                except:
+                    page_closed = True
+            
+            if page_closed:
                 print("[오류] 페이지가 이미 닫혔습니다. 브라우저를 다시 초기화합니다.")
                 await self.reset_browser(headless=False)
             
             print(f"[댓글] {post_url} 접속 중...")
             try:
-                await self.page.goto(post_url, wait_until='networkidle')
+                await self.page.goto(post_url, wait_until='networkidle', timeout=30000)
+                # 페이지 로드 후 추가 대기
+                await self.random_delay(2, 3)
+                # 스크롤하여 댓글 영역이 보이도록
+                await self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                await self.random_delay(1, 2)
             except AttributeError as attr_err:
                 if "_object" in str(attr_err):
                     print("[오류] 페이지 객체가 손상되었습니다. 브라우저를 재시작합니다.")
                     await self.reset_browser(headless=False)
-                    await self.page.goto(post_url, wait_until='networkidle')
+                    await self.page.goto(post_url, wait_until='networkidle', timeout=30000)
+                    await self.random_delay(2, 3)
+                    await self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                    await self.random_delay(1, 2)
                 else:
                     raise
             except Exception as goto_error:
                 if "_object" in str(goto_error):
                     print("[오류] 페이지 이동 중 Playwright 채널 오류가 발생했습니다. 브라우저를 재시작합니다.")
                     await self.reset_browser(headless=False)
-                    await self.page.goto(post_url, wait_until='networkidle')
+                    await self.page.goto(post_url, wait_until='networkidle', timeout=30000)
+                    await self.random_delay(2, 3)
+                    await self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                    await self.random_delay(1, 2)
                 else:
                     raise
             await self.random_delay(2, 4)
@@ -2581,6 +3351,36 @@ class MacroBot:
             # 페이지 로드 확인
             current_url = self.page.url
             print(f"[댓글] 현재 페이지 URL: {current_url}")
+            
+            # 게시글 작성 시간 확인 (24시간 이내인지 체크)
+            print("[댓글] ========================================")
+            print("[댓글] 게시글 작성 시간 확인 중...")
+            print("[댓글] ========================================")
+            try:
+                # 현재 페이지에서 작성 시간 가져오기
+                post_date = await self.get_post_date_from_current_page()
+                self._last_post_date = post_date
+                if post_date:
+                    now = datetime.now()
+                    time_diff = now - post_date
+                    hours_ago = time_diff.total_seconds() / 3600
+                    
+                    print(f"[댓글] 게시글 작성 시간: {post_date.strftime('%Y-%m-%d %H:%M')} ({hours_ago:.1f}시간 전)")
+                    
+                    if hours_ago > 24:
+                        print(f"[건너뛰기] 게시글이 24시간을 초과했습니다. ({hours_ago:.1f}시간 전)")
+                        print(f"[댓글] 댓글 작성을 건너뜁니다.")
+                        return False
+                    else:
+                        print(f"[확인] 게시글이 24시간 이내입니다. ({hours_ago:.1f}시간 전) - 댓글 작성 진행")
+                else:
+                    print("[경고] 게시글 작성 시간을 확인할 수 없습니다. 댓글을 작성합니다.")
+                    self._last_post_date = None
+            except Exception as e:
+                print(f"[경고] 게시글 작성 시간 확인 중 오류: {e}")
+                import traceback
+                traceback.print_exc()
+                print("[경고] 댓글을 작성합니다.")
             
             # 게시글 제목 가져오기
             print("[댓글] ========================================")
@@ -2615,6 +3415,13 @@ class MacroBot:
             print("[댓글] ========================================")
             print("[댓글] 기존 댓글들을 확인하는 중...")
             print("[댓글] ========================================")
+            # 댓글 영역까지 스크롤하여 모든 댓글이 로드되도록 보장
+            try:
+                await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+                await self.random_delay(1, 2)
+            except Exception:
+                pass
+            
             existing_comments = await self.get_existing_comments()
             
             print("[댓글] ========================================")
@@ -2703,14 +3510,197 @@ class MacroBot:
             # 댓글 간 랜덤 대기
             await self.enforce_comment_gap()
             
-            # 페이지가 닫혔는지 다시 확인
-            if not self.page or self.page.is_closed():
+            # 페이지가 닫혔는지 다시 확인 (Frame과 Page 구분)
+            page_closed = False
+            if not self.page:
+                page_closed = True
+            else:
+                try:
+                    # Page 객체인 경우
+                    if hasattr(self.page, 'is_closed'):
+                        page_closed = self.page.is_closed()
+                    # Frame 객체인 경우 (is_closed 메서드 없음) - main_page 확인
+                    elif self.main_page and hasattr(self.main_page, 'is_closed'):
+                        page_closed = self.main_page.is_closed()
+                except:
+                    page_closed = True
+            
+            if page_closed:
                 print("[오류] 페이지가 닫혔습니다. 댓글 작성 중단.")
                 return False
             
-            # 댓글 입력 필드 찾기
-            comment_input_selector = self.config.get('comment_input_selector', 'textarea[name="comment"]')
-            await self.page.wait_for_selector(comment_input_selector, timeout=10000)
+            # 댓글 입력 필드 찾기 - 여러 선택자 시도
+            comment_input_selector = self.config.get('comment_input_selector', 'textarea[name="wr_content"]')
+            print(f"[댓글] 댓글 입력 필드 찾는 중: {comment_input_selector}")
+            
+            # 여러 선택자 시도 (실제 사이트 구조에 맞게 우선순위 조정)
+            possible_comment_selectors = [
+                # 실제 사이트의 정확한 선택자 (최우선)
+                'textarea[name="wr_content"]',
+                'textarea#wr_content',
+                'textarea.wr_content',
+                # 일반적인 댓글 필드 선택자
+                comment_input_selector,
+                'textarea[name="comment"]',
+                'textarea[id*="comment"]',
+                'textarea[id*="reply"]',
+                'textarea[name*="comment"]',
+                'textarea[name*="reply"]',
+                'textarea[name*="content"]',  # wr_content도 매칭됨
+                'textarea.comment',
+                'textarea#comment',
+                'textarea#reply',
+                'textarea[placeholder*="댓글"]',
+                'textarea[placeholder*="comment"]',
+                'textarea[placeholder*="reply"]',
+                # 폴백 선택자
+                'textarea',
+                'input[name="comment"]',
+                'input[id*="comment"]',
+                'input[type="text"][name*="comment"]',
+                'input[type="text"][id*="comment"]',
+                'div[contenteditable="true"]',  # contenteditable div
+                'div[contenteditable="true"][id*="comment"]',
+                'div[contenteditable="true"][class*="comment"]',
+            ]
+            
+            found_comment_selector = None
+            
+            # 먼저 iframe 확인 (원본 page 저장)
+            original_page = self.page
+            if self.main_page is None:
+                self.main_page = self.page
+            
+            try:
+                # main_page가 있으면 그것을 사용, 없으면 현재 page 사용
+                page_to_check = self.main_page if self.main_page else self.page
+                frames = page_to_check.frames
+                print(f"[디버깅] 페이지에 {len(frames)}개의 frame이 있습니다.")
+                for i, frame in enumerate(frames):
+                    try:
+                        for selector in possible_comment_selectors[:5]:  # 처음 5개만 iframe에서 시도
+                            try:
+                                await frame.wait_for_selector(selector, timeout=1000, state='visible')
+                                found_comment_selector = selector
+                                print(f"[댓글] 댓글 입력 필드를 iframe {i}에서 찾음: {selector}")
+                                # iframe에서 찾았으면 해당 frame 사용 (하지만 main_page는 유지)
+                                self.page = frame
+                                break
+                            except:
+                                continue
+                        if found_comment_selector:
+                            break
+                    except:
+                        continue
+            except:
+                pass
+            
+            # 메인 페이지에서 찾기
+            if not found_comment_selector:
+                for selector in possible_comment_selectors:
+                    try:
+                        # visible 상태로 찾기 시도
+                        await self.page.wait_for_selector(selector, timeout=2000, state='visible')
+                        found_comment_selector = selector
+                        print(f"[댓글] 댓글 입력 필드 찾음: {selector}")
+                        break
+                    except:
+                        try:
+                            # visible이 실패하면 attached 상태로 시도
+                            await self.page.wait_for_selector(selector, timeout=1000, state='attached')
+                            # 요소가 숨겨져 있을 수 있으니 강제로 보이게 만들기
+                            element = await self.page.query_selector(selector)
+                            if element:
+                                await self.page.evaluate("""
+                                    (el) => {
+                                        el.style.display = 'block';
+                                        el.style.visibility = 'visible';
+                                        el.style.opacity = '1';
+                                    }
+                                """, element)
+                                found_comment_selector = selector
+                                print(f"[댓글] 댓글 입력 필드 찾음 (숨겨진 요소 활성화): {selector}")
+                                break
+                        except:
+                            continue
+            
+            if not found_comment_selector:
+                # 모든 선택자 실패 시 페이지 HTML 확인
+                print("[디버깅] 페이지의 모든 textarea 요소 확인 중...")
+                textareas = await self.page.query_selector_all('textarea')
+                print(f"[디버깅] 발견된 textarea 요소 수: {len(textareas)}")
+                for i, ta in enumerate(textareas[:10]):  # 처음 10개
+                    try:
+                        textarea_info = await ta.evaluate('el => ({type: el.type, name: el.name, id: el.id, class: el.className, placeholder: el.placeholder, visible: el.offsetParent !== null})')
+                        print(f"[디버깅] Textarea {i+1}: {textarea_info}")
+                    except:
+                        pass
+                
+                # input 요소도 확인
+                print("[디버깅] 페이지의 모든 input 요소 확인 중...")
+                inputs = await self.page.query_selector_all('input')
+                print(f"[디버깅] 발견된 input 요소 수: {len(inputs)}")
+                for i, inp in enumerate(inputs[:10]):  # 처음 10개
+                    try:
+                        input_info = await inp.evaluate('el => ({type: el.type, name: el.name, id: el.id, class: el.className, placeholder: el.placeholder, visible: el.offsetParent !== null})')
+                        print(f"[디버깅] Input {i+1}: {input_info}")
+                    except:
+                        pass
+                
+                # 페이지 HTML 일부 저장
+                try:
+                    page_html = await self.page.content()
+                    # 댓글 관련 부분만 추출
+                    import re
+                    comment_section = re.search(r'(?i)(<form[^>]*>.*?</form>|<div[^>]*(?:comment|reply|댓글)[^>]*>.*?</div>)', page_html, re.DOTALL)
+                    if comment_section:
+                        with open('comment_section_debug.html', 'w', encoding='utf-8') as f:
+                            f.write(comment_section.group(0))
+                        print("[디버깅] 댓글 섹션 HTML 저장: comment_section_debug.html")
+                    else:
+                        # 전체 HTML 저장 (크기가 클 수 있음)
+                        with open('page_debug.html', 'w', encoding='utf-8') as f:
+                            f.write(page_html[:50000])  # 처음 50KB만
+                        print("[디버깅] 페이지 HTML 일부 저장: page_debug.html")
+                except Exception as html_error:
+                    print(f"[디버깅] HTML 저장 실패: {html_error}")
+                
+                # 스크린샷 저장
+                try:
+                    await self.page.screenshot(path='comment_field_debug.png', full_page=True)
+                    print("[디버깅] 스크린샷 저장: comment_field_debug.png")
+                except:
+                    pass
+                
+                raise Exception(f"댓글 입력 필드를 찾을 수 없습니다. 시도한 선택자: {possible_comment_selectors}")
+            
+            comment_input_selector = found_comment_selector
+            
+            # 찾은 필드가 실제로 댓글 필드인지 확인 (wr_content 또는 comment 관련)
+            try:
+                element_info = await self.page.evaluate(f"""
+                    (selector) => {{
+                        const el = document.querySelector(selector);
+                        if (!el) return null;
+                        return {{
+                            name: el.name,
+                            id: el.id,
+                            placeholder: el.placeholder,
+                            className: el.className,
+                            isVisible: el.offsetParent !== null,
+                            isInForm: el.closest('form') !== null
+                        }};
+                    }}
+                """, comment_input_selector)
+                
+                if element_info:
+                    print(f"[댓글] 찾은 필드 정보: name={element_info.get('name')}, id={element_info.get('id')}")
+                    # wr_content가 아니고 comment도 아닌 경우 경고
+                    if 'wr_content' not in element_info.get('name', '') and 'wr_content' not in element_info.get('id', ''):
+                        if 'comment' not in element_info.get('name', '').lower() and 'comment' not in element_info.get('id', '').lower():
+                            print(f"[경고] 찾은 필드가 댓글 필드가 아닐 수 있습니다: {element_info}")
+            except:
+                pass
             
             # 댓글 입력 필드 클릭해서 포커스 주기
             await self.page.click(comment_input_selector)
@@ -2721,37 +3711,69 @@ class MacroBot:
             await self.page.type(comment_input_selector, comment_text, delay=100)
             await self.random_delay(1, 2)
             
-            # 댓글 작성 버튼 찾기 및 클릭
-            # 우선순위: id="btn_submit" > input[type="submit"] > 기타
-            submit_button_selector = '#btn_submit'
+            # 입력 확인
+            try:
+                input_value = await self.page.input_value(comment_input_selector)
+                if input_value and comment_text in input_value:
+                    print(f"[댓글] 댓글 입력 확인 완료: '{input_value[:50]}...'")
+                else:
+                    print(f"[경고] 입력된 내용이 예상과 다릅니다. 입력값: '{input_value}'")
+            except:
+                pass
+            
+            # 댓글 작성 버튼 찾기 및 클릭 - 여러 선택자 시도
+            submit_button_selector = self.config.get('submit_button_selector', '#btn_submit')
+            print(f"[댓글] 댓글 등록 버튼 찾는 중: {submit_button_selector}")
+            
+            # 여러 선택자 시도
+            possible_submit_selectors = [
+                submit_button_selector,
+                '#btn_submit',
+                'input#btn_submit',
+                'button#btn_submit',
+                'input.btn_submit',
+                'button.btn_submit',
+                'input[type="submit"]',
+                'button[type="submit"]',
+                'input[value*="등록"]',
+                'input[value*="댓글"]',
+                'button:has-text("등록")',
+                'button:has-text("댓글")',
+                'input[value="댓글등록"]',
+                'input[value="등록"]',
+                'button[value*="등록"]',
+                'a.btn_submit',
+                'a:has-text("등록")',
+            ]
+            
+            found_submit_selector = None
             submit_button = None
             
-            try:
-                # 먼저 정확한 ID로 찾기
-                await self.page.wait_for_selector(submit_button_selector, timeout=3000, state='visible')
-                submit_button = await self.page.query_selector(submit_button_selector)
-                print(f"[댓글] 등록 버튼 찾음: {submit_button_selector}")
-            except Exception:
-                # ID로 못 찾으면 다른 선택자 시도
-                fallback_selectors = [
-                    'input#btn_submit',
-                    'input.btn_submit',
-                    'input[type="submit"]',
-                    'input[value="댓글등록"]',
-                    'button[type="submit"]'
-                ]
-                for selector in fallback_selectors:
-                    try:
-                        await self.page.wait_for_selector(selector, timeout=2000, state='visible')
-                        submit_button = await self.page.query_selector(selector)
-                        submit_button_selector = selector
-                        print(f"[댓글] 등록 버튼 찾음: {selector}")
+            for selector in possible_submit_selectors:
+                try:
+                    await self.page.wait_for_selector(selector, timeout=2000, state='visible')
+                    submit_button = await self.page.query_selector(selector)
+                    if submit_button:
+                        found_submit_selector = selector
+                        print(f"[댓글] 댓글 등록 버튼 찾음: {selector}")
                         break
-                    except Exception:
-                        continue
+                except:
+                    continue
             
-            if not submit_button:
-                raise RuntimeError("댓글 등록 버튼을 찾을 수 없습니다.")
+            if not submit_button or not found_submit_selector:
+                # 모든 선택자 실패 시 페이지 HTML 확인
+                print("[디버깅] 페이지의 모든 버튼/input 요소 확인 중...")
+                buttons = await self.page.query_selector_all('button, input[type="submit"], input[type="button"]')
+                print(f"[디버깅] 발견된 버튼 요소 수: {len(buttons)}")
+                for i, btn in enumerate(buttons[:10]):  # 처음 10개만
+                    try:
+                        btn_info = await btn.evaluate('el => ({tag: el.tagName, type: el.type, id: el.id, name: el.name, value: el.value, class: el.className, text: el.textContent?.substring(0, 20)})')
+                        print(f"[디버깅] Button/Input {i+1}: {btn_info}")
+                    except:
+                        pass
+                raise RuntimeError(f"댓글 등록 버튼을 찾을 수 없습니다. 시도한 선택자: {possible_submit_selectors}")
+            
+            submit_button_selector = found_submit_selector
             
             # 버튼이 보이도록 스크롤
             await submit_button.scroll_into_view_if_needed()
@@ -2882,9 +3904,15 @@ class MacroBot:
             
             print(f"[댓글] 댓글 작성 프로세스 완료: {comment_text}")
             
+            # Frame을 사용했다면 원본 page로 복원
+            if self.main_page and self.page != self.main_page:
+                print("[댓글] 원본 페이지로 복원 중...")
+                self.page = self.main_page
+            
             # 댓글 작성 성공 시 게시글 URL 저장 (중복 방지)
             self.save_commented_post(post_url)
             self.record_comment_usage(comment_text)
+            self.log_comment_feedback(post_title, post_content, existing_comments, comment_text)
             
             return True
             
@@ -2898,12 +3926,42 @@ class MacroBot:
         """게시판으로 돌아가기"""
         try:
             print("[게시판] 게시판으로 돌아가는 중...")
-            if self.page and not self.page.is_closed():
-                await self.navigate_to_board_page(self.current_page)
+            
+            # 페이지 상태 확인 (Frame과 Page 구분)
+            page_ok = False
+            if self.page:
+                try:
+                    # Page 객체인 경우
+                    if hasattr(self.page, 'is_closed'):
+                        page_ok = not self.page.is_closed()
+                    # Frame 객체인 경우 - main_page 확인
+                    elif self.main_page and hasattr(self.main_page, 'is_closed'):
+                        page_ok = not self.main_page.is_closed()
+                    else:
+                        page_ok = True  # Frame이면 일단 시도
+                except:
+                    page_ok = False
+            
+            if page_ok:
+                # 명시적으로 게시판 목록 페이지로 이동
+                board_url = self.build_board_page_url(self.current_page)
+                print(f"[게시판] 게시판 목록 페이지로 이동: {board_url}")
+                
+                # main_page가 있으면 그것을 사용, 없으면 현재 page 사용
+                page_to_use = self.main_page if self.main_page else self.page
+                if page_to_use and hasattr(page_to_use, 'goto'):
+                    await page_to_use.goto(board_url, wait_until='networkidle', timeout=30000)
+                    self.page = page_to_use  # 원본 page로 복원
+                    await self.random_delay(2, 3)
+                    print(f"[게시판] 게시판 복귀 완료: {self.page.url}")
+                else:
+                    await self.navigate_to_board_page(self.current_page)
             else:
                 print("[경고] 페이지가 이미 닫혔습니다.")
         except Exception as e:
             print(f"[경고] 게시판으로 돌아가는 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def random_delay(self, min_sec: float = None, max_sec: float = None):
         """랜덤 대기 시간"""
@@ -3047,51 +4105,35 @@ def load_config():
 
 async def main():
     """메인 함수"""
-    # 브라우저 자동 설치 확인 (별도 스레드에서 실행하여 asyncio 루프와 충돌 방지)
-    try:
-        # sync API를 별도 스레드에서 실행 (Python 3.9+)
-        # Python 3.7-3.8 호환성을 위해 loop.run_in_executor 사용
-        loop = asyncio.get_event_loop()
-        browser_ok = await loop.run_in_executor(None, ensure_playwright_browser)
-        
-        if not browser_ok:
-            print()
-            print("=" * 60)
-            print("[경고] 브라우저 확인에 실패했습니다.")
-            print("=" * 60)
-            print()
-            print("프로그램을 계속 실행하지만 브라우저 관련 오류가 발생할 수 있습니다.")
-            print("브라우저 설치 문제를 해결하려면:")
-            print("  1. 터미널에서 다음 명령어 실행: python -m playwright install chromium")
-            print("  2. 또는 '브라우저_설치.bat' 파일을 실행하세요 (있는 경우)")
-            print()
-            user_input = input("계속 진행하시겠습니까? (y/n): ").strip().lower()
-            if user_input != 'y':
-                print("프로그램을 종료합니다.")
-                return
-            print()
-    except Exception as e:
-        error_msg = str(e)
-        if "platform independent libraries" in error_msg or "prefix" in error_msg.lower():
-            print()
-            print("=" * 60)
-            print("[오류] Python 환경 문제가 감지되었습니다.")
-            print("=" * 60)
-            print()
-            print("해결 방법:")
-            print("1. Python을 재설치하세요 (https://www.python.org/downloads/)")
-            print("2. 다음 명령어로 Playwright 브라우저를 수동 설치하세요:")
-            print("   python -m playwright install chromium")
-            print()
-            print("3. 가상 환경을 사용하는 경우:")
-            print("   - 가상 환경을 비활성화하고 다시 시도하세요")
-            print("   - 또는 새로운 가상 환경을 만들고 다시 설치하세요")
-            print()
-            print("=" * 60)
-            return
-        else:
+    # 실행파일인 경우 브라우저 확인을 건너뛰고 바로 진행
+    # (실제 브라우저 사용 시 오류가 발생하면 그때 처리)
+    is_frozen = getattr(sys, 'frozen', False)
+    
+    if not is_frozen:
+        # Python 스크립트인 경우에만 브라우저 확인
+        try:
+            loop = asyncio.get_event_loop()
+            browser_ok = await loop.run_in_executor(None, ensure_playwright_browser)
+            
+            if not browser_ok:
+                print()
+                print("=" * 60)
+                print("[경고] 브라우저 확인에 실패했습니다.")
+                print("=" * 60)
+                print()
+                print("브라우저가 이미 설치되어 있다면 프로그램이 정상 작동할 수 있습니다.")
+                print("브라우저 설치 문제를 해결하려면:")
+                print("  python -m playwright install chromium")
+                print()
+                user_input = input("계속 진행하시겠습니까? (y/n): ").strip().lower()
+                if user_input != 'y':
+                    print("프로그램을 종료합니다.")
+                    return
+                print()
+        except Exception as e:
             print(f"[경고] 브라우저 확인 중 오류: {e}")
             print("[경고] 계속 진행하지만 문제가 발생할 수 있습니다.")
+            print()
     
     config = load_config()
     
